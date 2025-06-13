@@ -1,5 +1,0 @@
-[Fri Jun 13 01:38:30 AM UTC 2025] Starting task 13 with T_e=, k= on GPU 6
-usage: simple.py [-h] [--T_e T_E] [--k K] [--T_total T_TOTAL]
-                 [--num_examples NUM_EXAMPLES] [--temperature TEMPERATURE]
-simple.py: error: argument --T_e: expected one argument
-[Fri Jun 13 01:38:36 AM UTC 2025] Finished task 13
