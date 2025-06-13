@@ -2,12 +2,12 @@
 - [x] Not Thinking in Phase 2
 - [x] Abalation on T_e, T_total, k
 - [ ] Different Operations:
-    - [ ] Element-wise Max
-    - [ ] Weighted by 1/p
-    - [ ] Dirichlet Noise
-    - [ ] Nucleus based averaging
-    - [ ] Hidden State - last nth hidden state 
-- [ ] GRPO
+    - [x] Element-wise Max
+    - [x] Weighted by 1/p
+    - [x] Dirichlet Noise
+    - [x] Nucleus based averaging
+    - [ ] Hidden State - last nth hidden state - Saturday
+- [ ] GRPO - Saturday
 - [x] Visualization
     - [x] 
 ----

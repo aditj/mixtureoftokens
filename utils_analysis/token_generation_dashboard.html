@@ -208,6 +208,136 @@
             padding: 8px 12px;
             border-radius: 4px;
         }
+
+        .summary-section {
+            background-color: #f8f9fa;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 30px;
+            border: 1px solid #dee2e6;
+            display: none;
+        }
+
+        .summary-title {
+            font-size: 20px;
+            font-weight: bold;
+            margin-bottom: 20px;
+            color: #333;
+            border-bottom: 2px solid #28a745;
+            padding-bottom: 8px;
+        }
+
+        .summary-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+
+        .summary-card {
+            background-color: white;
+            padding: 15px;
+            border-radius: 6px;
+            border: 1px solid #dee2e6;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+        }
+
+        .summary-card h4 {
+            margin: 0 0 12px 0;
+            color: #495057;
+            font-size: 16px;
+            border-bottom: 1px solid #e9ecef;
+            padding-bottom: 8px;
+        }
+
+        .summary-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 15px;
+            background-color: white;
+            border-radius: 6px;
+            overflow: hidden;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+        }
+
+        .summary-table th {
+            background-color: #495057;
+            color: white;
+            padding: 12px;
+            text-align: left;
+            font-weight: 600;
+        }
+
+        .summary-table td {
+            padding: 10px 12px;
+            border-bottom: 1px solid #dee2e6;
+        }
+
+        .summary-table tr:nth-child(even) {
+            background-color: #f8f9fa;
+        }
+
+        .summary-table tr:hover {
+            background-color: #e9ecef;
+        }
+
+        .metric-value {
+            font-weight: 600;
+            color: #007bff;
+        }
+
+        .confidence-interval {
+            font-size: 0.9em;
+            color: #6c757d;
+            font-style: italic;
+        }
+
+        .search-container {
+            position: relative;
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+        }
+
+        .search-input {
+            padding: 8px 12px;
+            border: 2px solid #ddd;
+            border-radius: 5px;
+            font-size: 14px;
+            transition: border-color 0.2s ease;
+        }
+
+        .search-input:focus {
+            outline: none;
+            border-color: #007bff;
+            box-shadow: 0 0 0 2px rgba(0, 123, 255, 0.25);
+        }
+
+        .search-input::placeholder {
+            color: #999;
+            font-style: italic;
+        }
+
+        .dropdown-container {
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+            min-width: 250px;
+        }
+
+        .controls {
+            display: flex;
+            gap: 20px;
+            margin-bottom: 30px;
+            align-items: flex-start;
+            flex-wrap: wrap;
+        }
+
+        .search-label {
+            font-size: 12px;
+            color: #666;
+            font-weight: 500;
+        }
     </style>
 </head>
 <body>
@@ -218,12 +348,54 @@
         </div>
 
         <div class="controls">
-            <select id="fileSelect" class="file-input">
-                <option value="">Loading files...</option>
-            </select>
-            <select id="questionSelect" class="question-select" disabled>
-                <option value="">Select a question...</option>
-            </select>
+            <div class="dropdown-container">
+                <div class="search-label">Experiment File</div>
+                <input type="text" id="fileSearch" class="search-input" placeholder="Type to filter files..." disabled>
+                <select id="fileSelect" class="file-input">
+                    <option value="">Loading files...</option>
+                </select>
+            </div>
+            <div class="dropdown-container">
+                <div class="search-label">Question</div>
+                <input type="text" id="questionSearch" class="search-input" placeholder="Type to filter questions..." disabled>
+                <select id="questionSelect" class="question-select" disabled>
+                    <option value="">Select a question...</option>
+                </select>
+            </div>
+        </div>
+
+        <div id="summarySection" class="summary-section">
+            <div class="summary-title">Experiment Summary</div>
+            <div class="summary-grid">
+                <div class="summary-card">
+                    <h4>Experiment Parameters</h4>
+                    <div id="experimentParams"></div>
+                </div>
+                <div class="summary-card">
+                    <h4>Overall Performance</h4>
+                    <div id="overallStats"></div>
+                </div>
+                <div class="summary-card">
+                    <h4>Token Statistics</h4>
+                    <div id="tokenStats"></div>
+                </div>
+                <div class="summary-card">
+                    <h4>Phase Analysis</h4>
+                    <div id="phaseStats"></div>
+                </div>
+            </div>
+            <table class="summary-table">
+                <thead>
+                    <tr>
+                        <th>Metric</th>
+                        <th>Value</th>
+                        <th>95% Confidence Interval</th>
+                        <th>Additional Info</th>
+                    </tr>
+                </thead>
+                <tbody id="summaryTableBody">
+                </tbody>
+            </table>
         </div>
 
         <div id="questionInfo" class="question-info" style="display: none;">
@@ -259,6 +431,8 @@
         let currentQuestionData = null;
         let currentZoom = 1;
         let tokenDict = {}; // This will be populated when you plug in your token dictionary
+        let allFiles = []; // Store all files for filtering
+        let allQuestions = []; // Store all questions for filtering
 
         // Token text lookup function
         function getTokenText(tokenId) {
@@ -284,6 +458,15 @@
             if (filePath) {
                 currentFile = filePath;
                 loadQuestions(filePath);
+                loadFileSummary(filePath);
+                // Clear question search when a new file is selected
+                document.getElementById('questionSearch').value = '';
+            } else {
+                document.getElementById('summarySection').style.display = 'none';
+                document.getElementById('questionInfo').style.display = 'none';
+                // Disable and clear question search when no file is selected
+                document.getElementById('questionSearch').disabled = true;
+                document.getElementById('questionSearch').value = '';
             }
         });
 
@@ -335,8 +518,25 @@
             }
         }
 
+        // Load file summary from backend
+        async function loadFileSummary(filePath) {
+            try {
+                console.log(`Loading summary for file: ${filePath}`);
+                const response = await fetch(`/api/file-summary?file=${encodeURIComponent(filePath)}`);
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                const summaryData = await response.json();
+                displayFileSummary(summaryData);
+            } catch (error) {
+                console.error('Error loading file summary:', error);
+                showError('Failed to load file summary: ' + error.message);
+            }
+        }
+
         // Populate file dropdown
         function populateFileSelect(files) {
+            allFiles = files; // Store all files for filtering
             const select = document.getElementById('fileSelect');
             select.innerHTML = '<option value="">Select a file...</option>';
             
@@ -347,11 +547,46 @@
                 select.appendChild(option);
             });
 
+            // Enable file search after files are loaded
+            document.getElementById('fileSearch').disabled = false;
             console.log(`Populated file dropdown with ${files.length} files`);
+        }
+
+        // Filter files based on search input
+        function filterFiles() {
+            const searchTerm = document.getElementById('fileSearch').value.toLowerCase();
+            const select = document.getElementById('fileSelect');
+            
+            // Clear current options
+            select.innerHTML = '<option value="">Select a file...</option>';
+            
+            // Filter and add matching files
+            const filteredFiles = allFiles.filter(file => 
+                file.name.toLowerCase().includes(searchTerm) || 
+                file.path.toLowerCase().includes(searchTerm)
+            );
+            
+            filteredFiles.forEach(file => {
+                const option = document.createElement('option');
+                option.value = file.path;
+                option.textContent = file.name;
+                select.appendChild(option);
+            });
+            
+            // If search is cleared, restore all files
+            if (searchTerm === '') {
+                allFiles.forEach(file => {
+                    const option = document.createElement('option');
+                    option.value = file.path;
+                    option.textContent = file.name;
+                    select.appendChild(option);
+                });
+            }
         }
 
         // Populate question dropdown
         function populateQuestionSelect(questions) {
+            allQuestions = questions; // Store all questions for filtering
             const select = document.getElementById('questionSelect');
             select.innerHTML = '<option value="">Select a question...</option>';
             
@@ -363,7 +598,42 @@
             });
             
             select.disabled = false;
+            // Enable question search after questions are loaded
+            document.getElementById('questionSearch').disabled = false;
             console.log(`Populated question dropdown with ${questions.length} questions`);
+        }
+
+        // Filter questions based on search input
+        function filterQuestions() {
+            const searchTerm = document.getElementById('questionSearch').value.toLowerCase();
+            const select = document.getElementById('questionSelect');
+            
+            // Clear current options
+            select.innerHTML = '<option value="">Select a question...</option>';
+            
+            // Filter and add matching questions
+            const filteredQuestions = allQuestions.filter(question => 
+                question.question.toLowerCase().includes(searchTerm) ||
+                question.ground_truth?.toLowerCase().includes(searchTerm) ||
+                question.predicted_answer?.toLowerCase().includes(searchTerm)
+            );
+            
+            filteredQuestions.forEach((question, index) => {
+                const option = document.createElement('option');
+                option.value = question.index;
+                option.textContent = `Q${question.index + 1}: ${question.question.substring(0, 60)}...`;
+                select.appendChild(option);
+            });
+            
+            // If search is cleared, restore all questions
+            if (searchTerm === '') {
+                allQuestions.forEach((question, index) => {
+                    const option = document.createElement('option');
+                    option.value = question.index;
+                    option.textContent = `Q${question.index + 1}: ${question.question.substring(0, 60)}...`;
+                    select.appendChild(option);
+                });
+            }
         }
 
         // Question selection handler
@@ -395,6 +665,86 @@
 
             // Generate visualization
             generateVisualization(phaseInfo);
+        }
+
+        // Display file summary
+        function displayFileSummary(summaryData) {
+            document.getElementById('summarySection').style.display = 'block';
+            
+            // Experiment Parameters
+            const paramsDiv = document.getElementById('experimentParams');
+            if (summaryData.experiment_params.T_e && summaryData.experiment_params.k) {
+                paramsDiv.innerHTML = `
+                    <div><strong>T_e (Exploration Temperature):</strong> ${summaryData.experiment_params.T_e}</div>
+                    <div><strong>k (Number of Paths):</strong> ${summaryData.experiment_params.k}</div>
+                    <div><strong>Filename:</strong> ${summaryData.filename}</div>
+                `;
+            } else {
+                paramsDiv.innerHTML = `<div><strong>Filename:</strong> ${summaryData.filename}</div>`;
+            }
+            
+            // Overall Performance
+            const overallDiv = document.getElementById('overallStats');
+            overallDiv.innerHTML = `
+                <div><strong>Total Questions:</strong> ${summaryData.total_questions}</div>
+                <div><strong>Correct Answers:</strong> ${summaryData.correct_answers}</div>
+                <div><strong>Accuracy:</strong> <span class="metric-value">${(summaryData.accuracy * 100).toFixed(1)}%</span></div>
+                <div class="confidence-interval">95% CI: [${(summaryData.accuracy_ci.lower * 100).toFixed(1)}%, ${(summaryData.accuracy_ci.upper * 100).toFixed(1)}%]</div>
+            `;
+            
+            // Token Statistics
+            const tokenDiv = document.getElementById('tokenStats');
+            tokenDiv.innerHTML = `
+                <div><strong>Average Tokens:</strong> <span class="metric-value">${summaryData.avg_tokens.toFixed(1)}</span></div>
+                <div class="confidence-interval">95% CI: [${summaryData.token_ci.lower.toFixed(1)}, ${summaryData.token_ci.upper.toFixed(1)}]</div>
+                <div><strong>Min Tokens:</strong> ${summaryData.token_distribution.min_tokens}</div>
+                <div><strong>Max Tokens:</strong> ${summaryData.token_distribution.max_tokens}</div>
+                <div><strong>Median Tokens:</strong> ${summaryData.token_distribution.median_tokens}</div>
+            `;
+            
+            // Phase Analysis
+            const phaseDiv = document.getElementById('phaseStats');
+            phaseDiv.innerHTML = `
+                <div><strong>Avg Phase 1 Tokens:</strong> ${summaryData.phase_stats.avg_phase1_tokens.toFixed(1)}</div>
+                <div><strong>Avg Phase 2 Tokens:</strong> ${summaryData.phase_stats.avg_phase2_tokens.toFixed(1)}</div>
+                <div><strong>Avg Phase 1 Rounds:</strong> ${summaryData.phase_stats.avg_phase1_rounds.toFixed(1)}</div>
+                <div><strong>Phase 1 Token Std:</strong> ${summaryData.phase_stats.phase1_token_std.toFixed(1)}</div>
+            `;
+            
+            // Summary Table
+            const tableBody = document.getElementById('summaryTableBody');
+            tableBody.innerHTML = `
+                <tr>
+                    <td><strong>Accuracy</strong></td>
+                    <td><span class="metric-value">${(summaryData.accuracy * 100).toFixed(2)}%</span></td>
+                    <td class="confidence-interval">[${(summaryData.accuracy_ci.lower * 100).toFixed(2)}%, ${(summaryData.accuracy_ci.upper * 100).toFixed(2)}%]</td>
+                    <td>${summaryData.correct_answers}/${summaryData.total_questions} correct</td>
+                </tr>
+                <tr>
+                    <td><strong>Average Tokens</strong></td>
+                    <td><span class="metric-value">${summaryData.avg_tokens.toFixed(1)}</span></td>
+                    <td class="confidence-interval">[${summaryData.token_ci.lower.toFixed(1)}, ${summaryData.token_ci.upper.toFixed(1)}]</td>
+                    <td>σ = ${summaryData.token_distribution.std_tokens.toFixed(1)}</td>
+                </tr>
+                <tr>
+                    <td><strong>Phase 1 Tokens</strong></td>
+                    <td><span class="metric-value">${summaryData.phase_stats.avg_phase1_tokens.toFixed(1)}</span></td>
+                    <td>-</td>
+                    <td>σ = ${summaryData.phase_stats.phase1_token_std.toFixed(1)}</td>
+                </tr>
+                <tr>
+                    <td><strong>Phase 2 Tokens</strong></td>
+                    <td><span class="metric-value">${summaryData.phase_stats.avg_phase2_tokens.toFixed(1)}</span></td>
+                    <td>-</td>
+                    <td>σ = ${summaryData.phase_stats.phase2_token_std.toFixed(1)}</td>
+                </tr>
+                <tr>
+                    <td><strong>Token Range</strong></td>
+                    <td>${summaryData.token_distribution.min_tokens} - ${summaryData.token_distribution.max_tokens}</td>
+                    <td>-</td>
+                    <td>Median: ${summaryData.token_distribution.median_tokens}</td>
+                </tr>
+            `;
         }
 
         // Show error message to user
@@ -594,6 +944,11 @@
             console.log('Initializing Token Generation Dashboard...');
             await initializeTokenDict();
             await loadAvailableFiles();
+            
+            // Set up search event listeners
+            document.getElementById('fileSearch').addEventListener('input', filterFiles);
+            document.getElementById('questionSearch').addEventListener('input', filterQuestions);
+            
             console.log('Dashboard initialization complete.');
         }
         

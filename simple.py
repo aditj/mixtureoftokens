@@ -494,6 +494,7 @@ def main():
     parser.add_argument('--T_total', type=int, default=600, help='Total number of generation steps for mixture method')
     parser.add_argument('--num_examples', type=int, default=200, help='Number of GSM8K examples to evaluate')
     parser.add_argument('--temperature', type=float, default=0.6, help='Sampling temperature')
+    parser.add_argument('--experiment_name', type=str, default="answer_directly_element_wise_max", help='Experiment name')
     args = parser.parse_args()
 
     T_e = args.T_e
@@ -502,7 +503,7 @@ def main():
     T_exp = T_total - T_e
     num_examples = args.num_examples
     temperature = args.temperature
-
+    experiment_name = args.experiment_name
     print("Loading model and tokenizer...")
     model_name = "Qwen/Qwen2.5-3B-Instruct"  # Using Qwen2.5 as it's more readily available
     
@@ -527,7 +528,7 @@ def main():
     # Extract questions and ground truth answers
     questions = [example["question"] for example in examples]
     ground_truths = [parse_ground_truth(example["answer"]) for example in examples]
-    experiment_name = "answer_directly_element_wise_max"
+
     if "answer_directly" in experiment_name:
         PHASE_2_STRATEGY = "answer_first"
     else:
@@ -696,12 +697,7 @@ def main():
     with open(f'generation_comparison/{experiment_name}/{T_total}_{num_examples}_{temperature}/generation_comparison_T_e_{T_e}_k_{k}.json', 'w') as f:
         json.dump(comparison_data, f, indent=2)
     print(f"Detailed comparison data saved to 'generation_comparison/{experiment_name}/{T_total}_{num_examples}_{temperature}/generation_comparison_T_e_{T_e}_k_{k}.json'")
-    
-    # Save as pickle for fast loading
-    with open(f'generation_comparison/{experiment_name}/{T_total}_{num_examples}_{temperature}/generation_comparison_T_e_{T_e}_k_{k}.pkl', 'wb') as f:
-        pickle.dump(comparison_data, f)
-    print(f"Raw comparison data saved to 'generation_comparison/{experiment_name}/{T_total}_{num_examples}_{temperature}/generation_comparison_T_e_{T_e}_k_{k}.pkl'")
-
+   
 
 if __name__ == "__main__":
     main()

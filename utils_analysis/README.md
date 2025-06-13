@@ -20,6 +20,12 @@ This toolkit provides multiple ways to analyze and visualize the results of toke
 A web-based dashboard for visualizing token generation in two-phase experiments:
 
 #### Features:
+- **Experiment Summary**: Statistical analysis similar to `print_generation.py` with:
+  - Bootstrapped confidence intervals for accuracy and token counts
+  - Experiment parameter extraction (T_e, k values)
+  - Phase-wise token analysis and distribution statistics
+  - Publication-ready summary table with key metrics
+  
 - **Phase 1 Visualization**: Interactive table showing embedding mixture generation with:
   - Token-by-token generation across multiple rounds
   - Probability-based color coding (darker = higher probability)
@@ -27,8 +33,14 @@ A web-based dashboard for visualizing token generation in two-phase experiments:
   - Zoom controls for detailed inspection
   
 - **Phase 2 Visualization**: Standard generation tokens displayed as a sequence
-- **File Management**: Browse and load different experiment results
-- **Question Navigation**: Select specific questions to analyze
+- **File Management**: Browse and load different experiment results with search filtering
+  - Type to filter files by name or path
+  - Real-time search as you type
+  
+- **Question Navigation**: Select specific questions to analyze with intelligent search
+  - Filter questions by question text, ground truth, or predicted answers
+  - Instant filtering for quick navigation through large datasets
+  
 - **Real-time Data Loading**: API-based data fetching with caching
 
 #### Usage:
@@ -44,6 +56,7 @@ python dashboard_server.py
 The dashboard will automatically:
 - Scan for JSON files in `../generation_comparison/*/` directories
 - Load the token dictionary for text conversion
+- Generate statistical summaries with confidence intervals
 - Provide an interface to browse experiments and questions
 
 ### 2. Statistical Analysis & Plotting
@@ -170,6 +183,8 @@ Install required packages:
 pip install transformers torch matplotlib seaborn numpy
 ```
 
+**Note**: The dashboard server now requires `numpy` for statistical computations (confidence intervals).
+
 ## Quick Start
 
 1. **Generate token dictionary**:
@@ -190,6 +205,14 @@ pip install transformers torch matplotlib seaborn numpy
 4. **Open dashboard in browser**:
    Navigate to `http://localhost:8000/token_generation_dashboard.html`
 
+## Usage Tips
+
+### Search and Filter
+- **File Search**: Type experiment names, parameters, or paths to quickly find specific experiments
+- **Question Search**: Filter questions by content, answers, or any text within the question data
+- **Real-time Filtering**: Results update as you type, no need to press enter
+- **Clear Search**: Delete search text to see all options again
+
 ## Advanced Features
 
 ### Dashboard API Endpoints
@@ -197,6 +220,7 @@ pip install transformers torch matplotlib seaborn numpy
 - `GET /api/files` - List available experiment files
 - `GET /api/questions?file=path` - Get questions for a specific file
 - `GET /api/question-data?file=path&question=index` - Get detailed question data
+- `GET /api/file-summary?file=path` - Get statistical summary for a specific file
 
 ### Customization
 

@@ -2,6 +2,7 @@
 import os
 import json
 import glob
+import numpy as np
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 import mimetypes
@@ -35,6 +36,12 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                     self.send_error(400, "Invalid question index")
             else:
                 self.send_error(400, "Missing file or question parameter")
+        elif parsed_path.path == '/api/file-summary':
+            file_path = query_params.get('file', [None])[0]
+            if file_path:
+                self.handle_file_summary_api(file_path)
+            else:
+                self.send_error(400, "Missing file parameter")
         else:
             # Serve static files (HTML, CSS, JS)
             super().do_GET()
@@ -180,6 +187,119 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             
         except Exception as e:
             self.send_error(500, f"Error loading question data: {str(e)}")
+    
+    def handle_file_summary_api(self, file_path):
+        """Return statistical summary for a specific file"""
+        try:
+            data = self.load_json_file(file_path)
+            
+            if not (data and 'embedding_mixture' in data):
+                raise Exception("Invalid file format - missing embedding_mixture")
+            
+            embedding_mixture = data['embedding_mixture']
+            results = embedding_mixture.get('results', [])
+            
+            if not results:
+                raise Exception("No results found in file")
+            
+            # Calculate basic statistics
+            total_questions = len(results)
+            correct_answers = sum(1 for r in results if r.get('is_correct', False))
+            accuracy = correct_answers / total_questions if total_questions > 0 else 0
+            
+            # Get token counts
+            token_counts = embedding_mixture.get('token_counts', [])
+            if not token_counts:
+                # Fallback: try to get from phase_info
+                token_counts = []
+                for result in results:
+                    phase_info = result.get('phase_info', {})
+                    total_tokens = phase_info.get('total_tokens', 0)
+                    if total_tokens > 0:
+                        token_counts.append(total_tokens)
+            
+            avg_tokens = np.mean(token_counts) if token_counts else 0
+            
+            # Bootstrap confidence intervals (similar to print_generation.py)
+            n_boot = 1000  # Reduced for faster response
+            
+            # Accuracy confidence interval
+            is_correct_list = [1 if r.get('is_correct', False) else 0 for r in results]
+            boot_acc = []
+            for _ in range(n_boot):
+                sample = np.random.choice(is_correct_list, size=len(is_correct_list), replace=True)
+                boot_acc.append(np.mean(sample))
+            
+            acc_ci_lower, acc_ci_upper = np.percentile(boot_acc, [2.5, 97.5])
+            
+            # Token count confidence interval
+            tok_ci_lower, tok_ci_upper = 0, 0
+            if token_counts:
+                boot_tok = []
+                for _ in range(n_boot):
+                    sample_tok = np.random.choice(token_counts, size=len(token_counts), replace=True)
+                    boot_tok.append(np.mean(sample_tok))
+                
+                tok_ci_lower, tok_ci_upper = np.percentile(boot_tok, [2.5, 97.5])
+            
+            # Calculate additional statistics
+            phase1_tokens = []
+            phase2_tokens = []
+            phase1_rounds = []
+            
+            for result in results:
+                phase_info = result.get('phase_info', {})
+                if phase_info.get('phase1_tokens', 0) > 0:
+                    phase1_tokens.append(phase_info['phase1_tokens'])
+                if phase_info.get('phase2_tokens', 0) > 0:
+                    phase2_tokens.append(phase_info['phase2_tokens'])
+                if phase_info.get('phase1_rounds_completed', 0) > 0:
+                    phase1_rounds.append(phase_info['phase1_rounds_completed'])
+            
+            # Extract experiment parameters from filename
+            import re
+            filename = os.path.basename(file_path)
+            match = re.search(r'T_e_(\d+)_k_(\d+)', filename)
+            experiment_params = {}
+            if match:
+                experiment_params['T_e'] = int(match.group(1))
+                experiment_params['k'] = int(match.group(2))
+            
+            # Prepare summary data
+            summary_data = {
+                'experiment_params': experiment_params,
+                'filename': filename,
+                'total_questions': total_questions,
+                'correct_answers': correct_answers,
+                'accuracy': accuracy,
+                'accuracy_ci': {
+                    'lower': acc_ci_lower,
+                    'upper': acc_ci_upper
+                },
+                'avg_tokens': avg_tokens,
+                'token_ci': {
+                    'lower': tok_ci_lower,
+                    'upper': tok_ci_upper
+                },
+                'phase_stats': {
+                    'avg_phase1_tokens': np.mean(phase1_tokens) if phase1_tokens else 0,
+                    'avg_phase2_tokens': np.mean(phase2_tokens) if phase2_tokens else 0,
+                    'avg_phase1_rounds': np.mean(phase1_rounds) if phase1_rounds else 0,
+                    'phase1_token_std': np.std(phase1_tokens) if phase1_tokens else 0,
+                    'phase2_token_std': np.std(phase2_tokens) if phase2_tokens else 0
+                },
+                'token_distribution': {
+                    'min_tokens': int(np.min(token_counts)) if token_counts else 0,
+                    'max_tokens': int(np.max(token_counts)) if token_counts else 0,
+                    'median_tokens': int(np.median(token_counts)) if token_counts else 0,
+                    'std_tokens': np.std(token_counts) if token_counts else 0
+                }
+            }
+            
+            self.send_json_response(summary_data)
+            
+        except Exception as e:
+            self.send_error(500, f"Error generating file summary: {str(e)}")
     
     def send_json_response(self, data):
         """Send JSON response with proper headers"""
