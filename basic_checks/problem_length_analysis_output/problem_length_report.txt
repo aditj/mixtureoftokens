@@ -1,0 +1,64 @@
+================================================================================
+PROBLEM LENGTH DISTRIBUTION ANALYSIS REPORT
+================================================================================
+
+BASIC STATISTICS:
+----------------------------------------
+Total problems analyzed: 50
+Total tokens generated: 15,581
+Average tokens per problem: 311.62
+Median tokens per problem: 306.00
+Standard deviation: 93.35
+Minimum tokens: 179
+Maximum tokens: 561
+Range: 382
+Coefficient of variation: 0.300
+
+PERCENTILE ANALYSIS:
+----------------------------------------
+ 1th percentile:  179.5 tokens
+ 5th percentile:  191.9 tokens
+10th percentile:  199.9 tokens
+25th percentile:  223.5 tokens
+50th percentile:  306.0 tokens
+75th percentile:  362.8 tokens
+90th percentile:  407.9 tokens
+95th percentile:  479.8 tokens
+99th percentile:  553.2 tokens
+
+Interquartile range (Q3-Q1): 139.2 tokens
+
+ACCURACY ANALYSIS:
+----------------------------------------
+Total correct answers: 42 (84.0%)
+Total incorrect answers: 8 (16.0%)
+
+Correct answers - token statistics:
+  Average: 297.7 tokens
+  Median: 303.0 tokens
+  Std dev: 83.5 tokens
+  Min: 179 tokens
+  Max: 545 tokens
+
+Incorrect answers - token statistics:
+  Average: 384.8 tokens
+  Median: 384.5 tokens
+  Std dev: 107.2 tokens
+  Min: 212 tokens
+  Max: 561 tokens
+
+EXTREME CASES:
+----------------------------------------
+5 shortest responses:
+1. Problem 40: 179 tokens (correct: True)
+2. Problem 34: 180 tokens (correct: True)
+3. Problem 22: 191 tokens (correct: True)
+4. Problem 1: 193 tokens (correct: True)
+5. Problem 16: 199 tokens (correct: True)
+
+5 longest responses:
+1. Problem 39: 561 tokens (correct: False)
+2. Problem 13: 545 tokens (correct: True)
+3. Problem 20: 501 tokens (correct: False)
+4. Problem 15: 454 tokens (correct: True)
+5. Problem 8: 434 tokens (correct: False)
