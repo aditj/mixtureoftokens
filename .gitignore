@@ -1,2 +1,10 @@
 venv/*
 venv
+*/__pycache__/*
+*.pkl
+./__pycache__/*
+./__pycache__/
+*/.pyc
+*/logs/*
+generation_comparison/std/*
+*.out

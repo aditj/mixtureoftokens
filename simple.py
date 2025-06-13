@@ -214,9 +214,12 @@ def generate_with_embedding_mixture(
     T_e: int = 50,
     T_exp: int = 200,
     k: int = 5,
+    top_p: float = 0.95,
     temperature: float = 0.8,
     min_end_prob: float = 0.1,
     return_phase_info: bool = False,
+    PHASE_2_STRATEGY: str = "think_first",  
+    experiment_name: str = "non_uniform",
 ) -> str | tuple[str, dict]:
     """Generate text using a two-phase approach:
     
@@ -282,7 +285,12 @@ def generate_with_embedding_mixture(
         probs = F.softmax(scaled_logits, dim=-1)
         
         # Get top-k tokens and their probabilities
-        top_k_probs, top_k_indices = torch.topk(probs, k, dim=-1)
+        if "nucleus" in experiment_name:
+            sorted_probs, sorted_indices = torch.sort(probs, descending=True)
+            cum_probs = torch.cumsum(sorted_probs, dim=-1)
+            top_k_probs, top_k_indices = sorted_probs[:torch.searchsorted(cum_probs, top_p)+1], sorted_indices[:torch.searchsorted(cum_probs, top_p)+1]
+        else:
+            top_k_probs, top_k_indices = torch.topk(probs, k, dim=-1)
         if probs[end_token_id] > 0.1:
             print(f"Stopping Phase 1 at round {round_idx} due to end token probability: {probs[end_token_id]:.3f}")
             break
@@ -300,15 +308,31 @@ def generate_with_embedding_mixture(
         
         # Create weighted mixture of embeddings
         # Normalize probabilities to sum to 1
-        normalized_probs = top_k_probs / top_k_probs.sum()
-        ### uniform mixture
-        #normalized_probs = torch.ones_like(top_k_probs) / top_k_probs.shape[0]
-        # Weighted sum: [k, hidden_size] * [k, 1] -> [hidden_size]
-        mixed_embedding = torch.sum(
-            top_k_embeddings * normalized_probs.unsqueeze(-1), 
-            dim=0
-        ).unsqueeze(0).unsqueeze(0)  # [1, 1, hidden_size]
-        
+        if "element_wise_max" in experiment_name:
+            ### the mixed embedding is the element-wise max of the top-k embeddings
+            mixed_embedding = torch.max(top_k_embeddings, dim=0).values        
+        else:
+            if "inverse_p" in experiment_name:
+                ### weighted mixture
+                normalized_probs = 1 / top_k_probs
+            else:
+                ### weighted mixture
+                normalized_probs = top_k_probs / top_k_probs.sum()
+                
+            # Weighted sum: [k, hidden_size] * [k, 1] -> [hidden_size]
+            mixed_embedding = torch.sum(
+                top_k_embeddings * normalized_probs.unsqueeze(-1), 
+                dim=0
+            ).unsqueeze(0).unsqueeze(0)  # [1, 1, hidden_size]
+        if "dirichlet" in experiment_name:
+            ### take a dirichlet sample with the same mean as the top-k embeddings
+            anchor_embedding =  torch.sum(
+                top_k_embeddings * normalized_probs.unsqueeze(-1), 
+                dim=0
+            )
+            d = torch.distributions.dirichlet.Dirichlet(anchor_embedding)
+            mixed_embedding = d.sample().unsqueeze(0).unsqueeze(0) # [1, 1, hidden_size]
+
         # Feed mixed embedding back to model
         with torch.no_grad():
             outputs = model(
@@ -363,32 +387,56 @@ def generate_with_embedding_mixture(
     # -------------------------------------------------------------------------
     # Add <think> token to start phase 2
     # -------------------------------------------------------------------------
-    think_start_token = "<think>"
-    try:
-        think_start_ids = tokenizer.encode(think_start_token, add_special_tokens=False)
-        for token_id in think_start_ids:
-            generated_token_ids.append(token_id)
-            transition_tokens.append(token_id)
-            
-            # Feed the actual token embedding
-            token_embedding = embedding_layer(
-                torch.tensor([[token_id]], device=device)
-            )
-            
-            with torch.no_grad():
-                outputs = model(
-                    inputs_embeds=token_embedding,
-                    past_key_values=past_key_values,
-                    use_cache=True,
-                    return_dict=True,
+    if PHASE_2_STRATEGY == "think_first":
+        think_start_token = "<think>"
+        try:
+            think_start_ids = tokenizer.encode(think_start_token, add_special_tokens=False)
+            for token_id in think_start_ids:
+                generated_token_ids.append(token_id)
+                transition_tokens.append(token_id)
+                
+                # Feed the actual token embedding
+                token_embedding = embedding_layer(
+                    torch.tensor([[token_id]], device=device)
                 )
-            past_key_values = outputs.past_key_values
-    except:
-        print("Warning: Could not add <think> token")
+                
+                with torch.no_grad():
+                    outputs = model(
+                        inputs_embeds=token_embedding,
+                        past_key_values=past_key_values,
+                        use_cache=True,
+                        return_dict=True,
+                    )
+                past_key_values = outputs.past_key_values
+        except:
+            print("Warning: Could not add <think> token")
     
     # -------------------------------------------------------------------------
     # Phase 2: Standard token-by-token generation for T_exp rounds
     # -------------------------------------------------------------------------
+    if PHASE_2_STRATEGY == "answer_first":
+        answer_start_token = "<answer>"
+        try:
+            answer_start_ids = tokenizer.encode(answer_start_token, add_special_tokens=False)
+            for token_id in answer_start_ids:
+                generated_token_ids.append(token_id)
+                transition_tokens.append(token_id)
+                
+                # Feed the actual token embedding
+                token_embedding = embedding_layer(
+                    torch.tensor([[token_id]], device=device)
+                )
+                
+                with torch.no_grad():
+                    outputs = model(
+                        inputs_embeds=token_embedding,
+                        past_key_values=past_key_values,
+                        use_cache=True,
+                        return_dict=True,
+                    )
+                past_key_values = outputs.past_key_values
+        except:
+            print("Warning: Could not add <answer> token")
     print(f"Phase 2: Standard generation for {T_exp} rounds...")
     
     for _ in range(T_exp):
@@ -479,7 +527,11 @@ def main():
     # Extract questions and ground truth answers
     questions = [example["question"] for example in examples]
     ground_truths = [parse_ground_truth(example["answer"]) for example in examples]
-    
+    experiment_name = "answer_directly_element_wise_max"
+    if "answer_directly" in experiment_name:
+        PHASE_2_STRATEGY = "answer_first"
+    else:
+        PHASE_2_STRATEGY = "think_first"
 
     # ---------------------------------------
     # 1) Embedding mixture generation
@@ -637,7 +689,8 @@ def main():
             }
         }
     }
-    experiment_name = "non_uniform"
+    
+
     os.makedirs(f'generation_comparison/{experiment_name}/{T_total}_{num_examples}_{temperature}', exist_ok=True)
     # Save as JSON for human readability
     with open(f'generation_comparison/{experiment_name}/{T_total}_{num_examples}_{temperature}/generation_comparison_T_e_{T_e}_k_{k}.json', 'w') as f:
