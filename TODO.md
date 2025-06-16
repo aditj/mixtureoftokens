@@ -6,7 +6,12 @@
     - [x] Weighted by 1/p
     - [x] Dirichlet Noise
     - [x] Nucleus based averaging
-    - [ ] Hidden State - last nth hidden state - Saturday
+    - [x] Hidden State - last nth hidden state - Saturday
+- [ ] Do it for Qwen3-4b
+- [ ] Do it for other models:
+    - [ ] https://huggingface.co/google/gemma-3-4b-it
+    - [ ] https://huggingface.co/microsoft/Phi-4-mini-reasoning
+    - [ ] https://huggingface.co/microsoft/Phi-4-mini-instruct
 - [ ] GRPO - Saturday
 - [x] Visualization
     - [x] 

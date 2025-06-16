@@ -1,0 +1,110 @@
+{
+  "examples": [
+    {
+      "name": "Simple Math",
+      "system_prompt": "You are a helpful mathematical reasoning assistant. Think step by step. Put your final answer within \\boxed{}.",
+      "user_prompt": "What is 25 + 17?",
+      "parameters": {
+        "k": 5,
+        "T_e": 30,
+        "T_total": 150,
+        "temperature": 0.6,
+        "experiment_name": "non_uniform"
+      }
+    },
+    {
+      "name": "Word Problem",
+      "system_prompt": "You are a mathematical reasoning assistant. Solve problems step by step. Put your final answer within \\boxed{}.",
+      "user_prompt": "Sarah has 24 apples. She gives away 8 apples to her friends and then buys 15 more apples. How many apples does Sarah have now?",
+      "parameters": {
+        "k": 7,
+        "T_e": 40,
+        "T_total": 200,
+        "temperature": 0.8,
+        "experiment_name": "element_wise_max"
+      }
+    },
+    {
+      "name": "Creative Writing",
+      "system_prompt": "You are a creative writing assistant. Write engaging and imaginative stories.",
+      "user_prompt": "Write a short story about a robot who discovers emotions.",
+      "parameters": {
+        "k": 10,
+        "T_e": 60,
+        "T_total": 300,
+        "temperature": 1.0,
+        "experiment_name": "dirichlet"
+      }
+    },
+    {
+      "name": "Code Generation",
+      "system_prompt": "You are a programming assistant. Write clean, well-commented code.",
+      "user_prompt": "Write a Python function to calculate the factorial of a number using recursion.",
+      "parameters": {
+        "k": 5,
+        "T_e": 25,
+        "T_total": 180,
+        "temperature": 0.4,
+        "experiment_name": "answer_directly_element_wise_max"
+      }
+    },
+    {
+      "name": "Complex Reasoning",
+      "system_prompt": "You are an expert reasoning assistant. Break down complex problems into smaller steps and solve them systematically.",
+      "user_prompt": "A train travels from City A to City B at 60 mph and returns at 40 mph. If the total trip takes 5 hours, what is the distance between the cities?",
+      "parameters": {
+        "k": 8,
+        "T_e": 50,
+        "T_total": 250,
+        "temperature": 0.7,
+        "experiment_name": "nucleus"
+      }
+    }
+  ],
+  "experiment_strategies": {
+    "non_uniform": {
+      "description": "Weighted mixture based on token probabilities",
+      "best_for": "General purpose, balanced exploration"
+    },
+    "element_wise_max": {
+      "description": "Takes element-wise maximum of top-k token embeddings",
+      "best_for": "Focused generation, mathematical problems"
+    },
+    "inverse_p": {
+      "description": "Uses inverse probability weighting",
+      "best_for": "Exploring low-probability but potentially important tokens"
+    },
+    "dirichlet": {
+      "description": "Samples from Dirichlet distribution",
+      "best_for": "Creative tasks, diverse exploration"
+    },
+    "nucleus": {
+      "description": "Uses nucleus (top-p) sampling for token selection",
+      "best_for": "Dynamic vocabulary selection"
+    },
+    "answer_directly_element_wise_max": {
+      "description": "Skips thinking phase, goes directly to answer",
+      "best_for": "Quick responses, direct answers"
+    }
+  },
+  "parameter_guidelines": {
+    "k": {
+      "description": "Number of top tokens for mixture",
+      "low": "3-5 for focused generation",
+      "medium": "5-8 for balanced exploration",
+      "high": "8-15 for diverse exploration"
+    },
+    "T_e": {
+      "description": "Phase 1 exploration rounds",
+      "low": "20-40 for quick experiments",
+      "medium": "40-80 for standard exploration",
+      "high": "80-150 for deep exploration"
+    },
+    "temperature": {
+      "description": "Sampling temperature",
+      "low": "0.3-0.6 for focused, deterministic output",
+      "medium": "0.6-0.9 for balanced creativity",
+      "high": "0.9-1.5 for highly creative output"
+    }
+  }
+} 

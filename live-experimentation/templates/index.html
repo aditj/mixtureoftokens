@@ -1,0 +1,748 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Live Token Generation Experiment</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f5f5f5;
+            line-height: 1.6;
+        }
+
+        .container {
+            max-width: 1600px;
+            margin: 0 auto;
+            background-color: white;
+            border-radius: 10px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            padding: 30px;
+        }
+
+        .header {
+            text-align: center;
+            margin-bottom: 40px;
+            padding-bottom: 20px;
+            border-bottom: 2px solid #007bff;
+        }
+
+        .header h1 {
+            color: #333;
+            margin-bottom: 10px;
+        }
+
+        .header p {
+            color: #666;
+            font-size: 16px;
+        }
+
+        .controls-section {
+            background-color: #f8f9fa;
+            padding: 25px;
+            border-radius: 8px;
+            margin-bottom: 30px;
+            border: 1px solid #dee2e6;
+        }
+
+        .controls-title {
+            font-size: 20px;
+            font-weight: bold;
+            margin-bottom: 20px;
+            color: #333;
+            border-bottom: 2px solid #28a745;
+            padding-bottom: 8px;
+        }
+
+        .form-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 30px;
+            margin-bottom: 25px;
+        }
+
+        .form-group {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .form-group label {
+            font-weight: 600;
+            color: #333;
+            font-size: 14px;
+        }
+
+        .form-group textarea, .form-group input, .form-group select {
+            padding: 12px;
+            border: 2px solid #ddd;
+            border-radius: 6px;
+            font-size: 14px;
+            transition: border-color 0.2s ease;
+        }
+
+        .form-group textarea:focus, .form-group input:focus, .form-group select:focus {
+            outline: none;
+            border-color: #007bff;
+            box-shadow: 0 0 0 3px rgba(0, 123, 255, 0.1);
+        }
+
+        .form-group textarea {
+            resize: vertical;
+            min-height: 120px;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+
+        .parameters-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+
+        .parameter-group {
+            background-color: white;
+            padding: 15px;
+            border-radius: 6px;
+            border: 1px solid #dee2e6;
+        }
+
+        .parameter-group label {
+            font-weight: 600;
+            color: #495057;
+            display: block;
+            margin-bottom: 8px;
+        }
+
+        .parameter-group input, .parameter-group select {
+            width: 100%;
+            padding: 8px 12px;
+            border: 1px solid #ced4da;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+
+        .parameter-help {
+            font-size: 12px;
+            color: #6c757d;
+            margin-top: 4px;
+            font-style: italic;
+        }
+
+        .generate-btn {
+            background: linear-gradient(135deg, #007bff, #0056b3);
+            color: white;
+            border: none;
+            padding: 15px 30px;
+            font-size: 16px;
+            font-weight: 600;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 6px rgba(0, 123, 255, 0.3);
+        }
+
+        .generate-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 12px rgba(0, 123, 255, 0.4);
+        }
+
+        .generate-btn:disabled {
+            background: #6c757d;
+            cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
+        }
+
+        .status-indicator {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            margin-right: 8px;
+        }
+
+        .status-ready { background-color: #28a745; }
+        .status-loading { background-color: #ffc107; }
+        .status-error { background-color: #dc3545; }
+
+        .results-section {
+            margin-top: 30px;
+            display: none;
+        }
+
+        .results-title {
+            font-size: 20px;
+            font-weight: bold;
+            margin-bottom: 20px;
+            color: #333;
+            border-bottom: 2px solid #28a745;
+            padding-bottom: 8px;
+        }
+
+        .generated-text {
+            background-color: #f8f9fa;
+            padding: 20px;
+            border-radius: 8px;
+            border: 1px solid #dee2e6;
+            margin-bottom: 25px;
+            font-family: 'Courier New', monospace;
+            white-space: pre-wrap;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-bottom: 25px;
+        }
+
+        .stat-card {
+            background-color: #e9ecef;
+            padding: 15px;
+            border-radius: 6px;
+            text-align: center;
+        }
+
+        .stat-value {
+            font-size: 24px;
+            font-weight: bold;
+            color: #007bff;
+        }
+
+        .stat-label {
+            font-size: 14px;
+            color: #6c757d;
+            margin-top: 5px;
+        }
+
+        .phase-container {
+            margin-bottom: 30px;
+        }
+
+        .phase-title {
+            font-size: 18px;
+            font-weight: bold;
+            margin-bottom: 15px;
+            color: #333;
+            border-bottom: 2px solid #007bff;
+            padding-bottom: 5px;
+        }
+
+        .phase1-container {
+            overflow: auto;
+            max-height: 600px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            background-color: #f8f9fa;
+        }
+
+        .phase1-table {
+            width: 100%;
+            border-collapse: separate;
+            border-spacing: 2px;
+        }
+
+        .phase1-table th {
+            background-color: #007bff;
+            color: white;
+            padding: 8px;
+            text-align: center;
+            position: sticky;
+            top: 0;
+            z-index: 10;
+            font-size: 12px;
+        }
+
+        .round-header {
+            background-color: #28a745 !important;
+            writing-mode: vertical-rl;
+            text-orientation: mixed;
+            width: 40px;
+            font-size: 11px;
+        }
+
+        .token-cell {
+            padding: 6px 8px;
+            text-align: center;
+            border-radius: 3px;
+            font-size: 11px;
+            min-width: 80px;
+            max-width: 120px;
+            word-wrap: break-word;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            font-family: 'Courier New', monospace;
+        }
+
+        .token-cell:hover {
+            transform: scale(1.05);
+            z-index: 5;
+            position: relative;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+        }
+
+        .phase2-container {
+            background-color: #f8f9fa;
+            padding: 15px;
+            border-radius: 5px;
+            border: 1px solid #ddd;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+
+        .phase2-tokens {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 5px;
+        }
+
+        .phase2-token {
+            background-color: #e9ecef;
+            padding: 4px 8px;
+            border-radius: 3px;
+            border: 1px solid #dee2e6;
+            font-size: 12px;
+            font-family: 'Courier New', monospace;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #666;
+            font-size: 18px;
+        }
+
+        .loading .spinner {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #007bff;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 20px;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .error {
+            background-color: #f8d7da;
+            color: #721c24;
+            padding: 15px;
+            border-radius: 6px;
+            border: 1px solid #f5c6cb;
+            margin: 20px 0;
+        }
+
+        .tooltip {
+            position: absolute;
+            background-color: #333;
+            color: white;
+            padding: 8px 12px;
+            border-radius: 4px;
+            font-size: 12px;
+            z-index: 1000;
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity 0.2s;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+        }
+
+        .model-status {
+            display: flex;
+            align-items: center;
+            margin-bottom: 20px;
+            padding: 12px;
+            background-color: #e9ecef;
+            border-radius: 6px;
+            font-size: 14px;
+        }
+
+        @media (max-width: 768px) {
+            .form-grid {
+                grid-template-columns: 1fr;
+                gap: 20px;
+            }
+            
+            .parameters-grid {
+                grid-template-columns: 1fr;
+            }
+            
+            .container {
+                padding: 15px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🧠 Live Token Generation Experiment</h1>
+            <p>Interactive interface for embedding mixture generation with real-time visualization</p>
+        </div>
+
+        <div class="model-status" id="modelStatus">
+            <span class="status-indicator status-loading"></span>
+            <span>Checking model status...</span>
+        </div>
+
+        <div class="controls-section">
+            <div class="controls-title">🎛️ Experiment Configuration</div>
+            
+            <div class="form-grid">
+                <div class="form-group">
+                    <label for="systemPrompt">System Prompt</label>
+                    <textarea id="systemPrompt" placeholder="Enter system prompt...">You are Qwen. You are a helpful mathematical reasoning assistant. Think step by step. Put your final answer within \boxed{}.</textarea>
+                </div>
+                
+                <div class="form-group">
+                    <label for="userPrompt">User Prompt</label>
+                    <textarea id="userPrompt" placeholder="Enter user prompt...">What is 25 + 17?</textarea>
+                </div>
+            </div>
+
+            <div class="parameters-grid">
+                <div class="parameter-group">
+                    <label for="k">k (Top-k tokens)</label>
+                    <input type="number" id="k" value="5" min="1" max="50">
+                    <div class="parameter-help">Number of top tokens for mixture</div>
+                </div>
+                
+                <div class="parameter-group">                    <label for="T_e">T_e (Exploration rounds)</label>
+                    <input type="number" id="T_e" value="50" min="1" max="500">
+                    <div class="parameter-help">Phase 1 embedding mixture rounds</div>
+                </div>
+                
+                <div class="parameter-group">
+                    <label for="T_total">T_total (Total rounds)</label>
+                    <input type="number" id="T_total" value="250" min="50" max="1000">
+                    <div class="parameter-help">Total generation rounds</div>
+                </div>
+                
+                <div class="parameter-group">
+                    <label for="temperature">Temperature</label>
+                    <input type="number" id="temperature" value="0.8" min="0.1" max="2.0" step="0.1">
+                    <div class="parameter-help">Sampling temperature</div>
+                </div>
+                
+                <div class="parameter-group">
+                    <label for="experimentName">Experiment Strategy</label>
+                    <select id="experimentName">
+                        <option value="non_uniform">Non-uniform (weighted)</option>
+                        <option value="element_wise_max">Element-wise max</option>
+                        <option value="inverse_p">Inverse probability</option>
+                        <option value="dirichlet">Dirichlet sampling</option>
+                        <option value="nucleus">Nucleus sampling</option>
+                        <option value="answer_directly_element_wise_max">Answer directly + element-wise max</option>
+                    </select>
+                    <div class="parameter-help">Sampling strategy for phase 1</div>
+                </div>
+            </div>
+
+            <div style="text-align: center; margin-top: 25px;">
+                <button class="generate-btn" id="generateBtn" onclick="generateText()">
+                    🚀 Generate Text
+                </button>
+            </div>
+        </div>
+
+        <div class="results-section" id="resultsSection">
+            <div class="results-title">📊 Generation Results</div>
+            
+            <div class="stats-grid" id="statsGrid">
+                <!-- Stats will be populated here -->
+            </div>
+            
+            <div style="margin-bottom: 25px;">
+                <h3 style="color: #333; margin-bottom: 10px;">Generated Text:</h3>
+                <div class="generated-text" id="generatedText"></div>
+            </div>
+
+            <div id="visualizationArea">
+                <!-- Visualization will be populated here -->
+            </div>
+        </div>
+    </div>
+
+    <div class="tooltip" id="tooltip"></div>
+
+    <script>
+        let currentResults = null;
+        let tokenTexts = {};
+
+        // Check model status on page load
+        async function checkModelStatus() {
+            try {
+                const response = await fetch('/api/model-status');
+                const status = await response.json();
+                
+                const statusElement = document.getElementById('modelStatus');
+                const generateBtn = document.getElementById('generateBtn');
+                
+                if (status.loaded) {
+                    statusElement.innerHTML = `
+                        <span class="status-indicator status-ready"></span>
+                        <span>Model loaded: ${status.model_name}</span>
+                    `;
+                    generateBtn.disabled = false;
+                } else {
+                    statusElement.innerHTML = `
+                        <span class="status-indicator status-error"></span>
+                        <span>Model not loaded</span>
+                    `;
+                    generateBtn.disabled = true;
+                }
+            } catch (error) {
+                const statusElement = document.getElementById('modelStatus');
+                statusElement.innerHTML = `
+                    <span class="status-indicator status-error"></span>
+                    <span>Error checking model status: ${error.message}</span>
+                `;
+                document.getElementById('generateBtn').disabled = true;
+            }
+        }
+
+        // Get token text from pre-fetched data
+        function getTokenText(tokenId) {
+            return tokenTexts[tokenId] || `Token_${tokenId}`;
+        }
+
+        // Generate text
+        async function generateText() {
+            const generateBtn = document.getElementById('generateBtn');
+            const resultsSection = document.getElementById('resultsSection');
+            
+            // Show loading state
+            generateBtn.disabled = true;
+            generateBtn.innerHTML = '<div class="spinner"></div> Generating...';
+            resultsSection.style.display = 'block';
+            
+            const visualizationArea = document.getElementById('visualizationArea');
+            visualizationArea.innerHTML = '<div class="loading"><div class="spinner"></div>Generating text...</div>';
+
+            try {
+                const requestData = {
+                    system_prompt: document.getElementById('systemPrompt').value,
+                    user_prompt: document.getElementById('userPrompt').value,
+                    k: parseInt(document.getElementById('k').value),
+                    T_e: parseInt(document.getElementById('T_e').value),
+                    T_total: parseInt(document.getElementById('T_total').value),
+                    temperature: parseFloat(document.getElementById('temperature').value),
+                    experiment_name: document.getElementById('experimentName').value
+                };
+
+                const response = await fetch('/api/generate', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify(requestData)
+                });
+
+                const data = await response.json();
+
+                if (data.success) {
+                    currentResults = data;
+                    tokenTexts = data.token_texts;  // Store pre-fetched token texts
+                    displayResults(data);
+                } else {
+                    throw new Error(data.error || 'Generation failed');
+                }
+
+            } catch (error) {
+                console.error('Error generating text:', error);
+                visualizationArea.innerHTML = `<div class="error">Error: ${error.message}</div>`;
+            } finally {
+                generateBtn.disabled = false;
+                generateBtn.innerHTML = '🚀 Generate Text';
+            }
+        }
+
+        // Display results
+        async function displayResults(data) {
+            // Update stats
+            const statsGrid = document.getElementById('statsGrid');
+            const phaseInfo = data.phase_info;
+            
+            statsGrid.innerHTML = `
+                <div class="stat-card">
+                    <div class="stat-value">${phaseInfo.total_tokens}</div>
+                    <div class="stat-label">Total Tokens</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value">${phaseInfo.phase1_tokens}</div>
+                    <div class="stat-label">Phase 1 Tokens</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value">${phaseInfo.phase2_tokens}</div>
+                    <div class="stat-label">Phase 2 Tokens</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value">${phaseInfo.phase1_rounds_completed}/${phaseInfo.phase1_rounds_requested}</div>
+                    <div class="stat-label">Phase 1 Rounds</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value">${data.parameters.k}</div>
+                    <div class="stat-label">k (Top-k)</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value">${data.parameters.temperature}</div>
+                    <div class="stat-label">Temperature</div>
+                </div>
+            `;
+
+            // Update generated text
+            document.getElementById('generatedText').textContent = data.generated_text;
+
+            // Generate visualization
+            await generateVisualization(phaseInfo);
+        }
+
+        // Generate visualization
+        async function generateVisualization(phaseInfo) {
+            const visualizationArea = document.getElementById('visualizationArea');
+            visualizationArea.innerHTML = '';
+
+            // Phase 1 visualization
+            const phase1Container = document.createElement('div');
+            phase1Container.className = 'phase-container';
+            phase1Container.innerHTML = '<div class="phase-title">Phase 1: Embedding Mixture Generation</div>';
+            
+            const phase1TableContainer = document.createElement('div');
+            phase1TableContainer.className = 'phase1-container';
+            
+            const phase1Table = await createPhase1Table(phaseInfo.phase1_token_ids);
+            phase1TableContainer.appendChild(phase1Table);
+            phase1Container.appendChild(phase1TableContainer);
+
+            // Phase 2 visualization
+            const phase2Container = document.createElement('div');
+            phase2Container.className = 'phase-container';
+            phase2Container.innerHTML = '<div class="phase-title">Phase 2: Standard Generation</div>';
+            
+            const phase2TokensContainer = document.createElement('div');
+            phase2TokensContainer.className = 'phase2-container';
+            
+            const phase2Tokens = await createPhase2Visualization(phaseInfo.phase2_token_ids);
+            phase2TokensContainer.appendChild(phase2Tokens);
+            phase2Container.appendChild(phase2TokensContainer);
+
+            visualizationArea.appendChild(phase1Container);
+            visualizationArea.appendChild(phase2Container);
+        }
+
+        // Color intensity function
+        function getColorIntensity(probability) {
+            const intensity = Math.min(Math.max(probability, 0), 1);
+            const red = Math.floor(255 * intensity);
+            const green = Math.floor(255 * (1 - intensity * 0.5));
+            const blue = Math.floor(255 * (1 - intensity));
+            return `rgb(${red}, ${green}, ${blue})`;
+        }
+
+        // Create Phase 1 table
+        async function createPhase1Table(phase1TokenIds) {
+            const table = document.createElement('table');
+            table.className = 'phase1-table';
+
+            // Create header
+            const headerRow = document.createElement('tr');
+            headerRow.innerHTML = '<th class="round-header">Round</th>';
+            
+            const maxK = Math.max(...phase1TokenIds.map(round => round[0].length));
+            for (let i = 0; i < maxK; i++) {
+                const th = document.createElement('th');
+                th.textContent = `Token ${i + 1}`;
+                headerRow.appendChild(th);
+            }
+            table.appendChild(headerRow);
+
+            // Create rows for each round
+            for (let roundIndex = 0; roundIndex < phase1TokenIds.length; roundIndex++) {
+                const [tokenIds, probabilities] = phase1TokenIds[roundIndex];
+                const row = document.createElement('tr');
+                
+                // Round number
+                const roundCell = document.createElement('td');
+                roundCell.className = 'round-header';
+                roundCell.textContent = roundIndex + 1;
+                row.appendChild(roundCell);
+
+                // Token cells
+                for (let i = 0; i < maxK; i++) {
+                    const cell = document.createElement('td');
+                    cell.className = 'token-cell';
+                    
+                    if (i < tokenIds.length) {
+                        const tokenId = tokenIds[i];
+                        const probability = probabilities[i];
+                        const tokenText = await getTokenText(tokenId);
+                        
+                        cell.textContent = tokenText;
+                        cell.style.backgroundColor = getColorIntensity(probability);
+                        cell.style.color = probability > 0.5 ? 'white' : 'black';
+                        
+                        // Add tooltip
+                        cell.addEventListener('mouseenter', (e) => showTooltip(e, tokenId, probability, tokenText));
+                        cell.addEventListener('mouseleave', hideTooltip);
+                    } else {
+                        cell.style.backgroundColor = '#f8f9fa';
+                    }
+                    
+                    row.appendChild(cell);
+                }
+                
+                table.appendChild(row);
+            }
+
+            return table;
+        }
+
+        // Create Phase 2 visualization
+        async function createPhase2Visualization(phase2TokenIds) {
+            const container = document.createElement('div');
+            container.className = 'phase2-tokens';
+
+            for (let index = 0; index < phase2TokenIds.length; index++) {
+                const tokenId = phase2TokenIds[index];
+                const tokenSpan = document.createElement('span');
+                tokenSpan.className = 'phase2-token';
+                tokenSpan.textContent = await getTokenText(tokenId);
+                tokenSpan.title = `Token ${index + 1}: ${tokenId}`;
+                container.appendChild(tokenSpan);
+            }
+
+            return container;
+        }
+
+        // Tooltip functions
+        function showTooltip(event, tokenId, probability, tokenText) {
+            const tooltip = document.getElementById('tooltip');
+            tooltip.innerHTML = `
+                <strong>Token:</strong> ${tokenText}<br>
+                <strong>ID:</strong> ${tokenId}<br>
+                <strong>Probability:</strong> ${probability.toFixed(4)}
+            `;
+            tooltip.style.left = event.pageX + 10 + 'px';
+            tooltip.style.top = event.pageY + 10 + 'px';
+            tooltip.style.opacity = '1';
+        }
+
+        function hideTooltip() {
+            document.getElementById('tooltip').style.opacity = '0';
+        }
+
+        // Initialize the application
+        document.addEventListener('DOMContentLoaded', function() {
+            checkModelStatus();
+        });
+    </script>
+</body>
+</html> 

@@ -85,18 +85,33 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                     experiment_dir = dir_parts[1]  # e.g., "answer_directly"
                     print(experiment_dir)
                     experiment_parameters = dir_parts[2]
-                    temperature = experiment_parameters.split('_')[2]
+                    exploration_time = experiment_parameters.split('_')[2]
                     num_examples = experiment_parameters.split('_')[1]
                     num_rounds = experiment_parameters.split('_')[0]
+                    if "hidden_state" in experiment_dir:
+                        hidden_state_exp = True
+                    else:
+                        hidden_state_exp = False
                     filename = dir_parts[-1]       # e.g., "generation_comparison_T_e_50_k_4.json"
                     
                     # Extract parameters from filename
                     import re
-                    match = re.search(r'T_e_(\d+)_k_(\d+)', filename)
+                    if hidden_state_exp:
+                        match = re.search(r'T_e_(\d+)_k_(\d+)_layer_offset_(\d+)', filename)
+                    else:
+                        match = re.search(r'T_e_(\d+)_k_(\d+)', filename)
                     if match:
-                        t_e, k = match.groups()
                         
-                        display_name = f"{experiment_dir} - T_e={t_e}, k={k}, T={num_rounds}, N={num_examples}, T={temperature}"
+                        if hidden_state_exp:
+                            t_e, k, layer_offset = match.groups()
+                            hidden_state_type = f"layer_offset_{layer_offset}"
+                            display_name = f"{experiment_dir} - T_e={t_e}, k={k}, T={num_rounds}, N={num_examples}, T_e={exploration_time}, h={hidden_state_type}"
+
+                        else:
+                            t_e, k = match.groups()
+                            display_name = f"{experiment_dir} - T_e={t_e}, k={k}, T={num_rounds}, N={num_examples}, T_e={exploration_time}"
+
+
                     else:
                         display_name = f"{experiment_dir} - {filename}"
                 else:
