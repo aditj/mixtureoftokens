@@ -5,6 +5,13 @@ venv
 ./__pycache__/*
 ./__pycache__/
 */.pyc
+*.pyc
 */logs/*
 generation_comparison/std/*
 *.out
+training_logs/*
+run_*
+DeepSeekRL-Extended/*
+DeepSeekRL-Extended/*.json
+DeepSeekRL-Extended/*.txt
+wandb/*

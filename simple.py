@@ -8,8 +8,7 @@ from collections import Counter
 import numpy as np
 import argparse
 import os
-import json
-
+import json 
 # -----------------------------------------------------------------------------
 # Embedding-space generation utilities
 # -----------------------------------------------------------------------------
@@ -54,90 +53,6 @@ def _sample_token_from_logits(logits: torch.Tensor, temperature: float = 1.0, to
     # Multinomial sampling to obtain the next token
     next_token_id = torch.multinomial(probs, num_samples=1)
     return next_token_id.item()
-
-
-def generate_in_embedding_space(
-    model,
-    tokenizer,
-    prompt: str,
-    *,
-    max_new_tokens: int = 256,
-    temperature: float = 0.8,
-    top_p: float = 0.95,
-    stop_token_id: int | None = None,
-    return_token_ids: bool = False,
-) -> str | tuple[str, list[int]]:
-    """Generate text *token-by-token* by manually feeding the **embeddings** of the sampled
-    tokens back into the model.
-
-    This mirrors what :pymeth:`~transformers.AutoModelForCausalLM.generate` does internally
-    but exposes the embedding-space interface explicitly, which can be useful for research
-    experiments.
-
-    The function operates on a *single* prompt string for clarity. It returns **only** the
-    *newly* generated text (without the prompt).
-    """
-
-    device = model.device
-
-    # ---------------------------------------------------------------------
-    # Encode the prompt and run a forward pass to prime the KV cache
-    # ---------------------------------------------------------------------
-    input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(device)
-
-    with torch.no_grad():
-        outputs = model(input_ids=input_ids, use_cache=True, return_dict=True)
-
-    # Retrieve past_key_values to avoid re-computing the prompt context each step
-    past_key_values = outputs.past_key_values
-
-    # We will sequentially append generated token ids here
-    generated_token_ids: list[int] = []
-
-    # We'll repeatedly sample tokens until we reach ``max_new_tokens`` or hit ``stop_token_id``
-    for _ in range(max_new_tokens):
-        # -----------------------------------------------------------------
-        # Sample next token from the logits of the *last* position
-        # -----------------------------------------------------------------
-        last_logits = outputs.logits[:, -1, :].squeeze(0)  # -> [vocab_size]
-        next_token_id = _sample_token_from_logits(
-            last_logits, temperature=temperature, top_p=top_p
-        )
-        generated_token_ids.append(next_token_id)
-
-        # Early stopping if EOS or custom stop token is generated
-        if (stop_token_id is not None and next_token_id == stop_token_id) or (
-            stop_token_id is None and next_token_id == tokenizer.eos_token_id
-        ):
-            break
-
-        # -----------------------------------------------------------------
-        # Convert the sampled token id to its **embedding** and feed it back
-        # -----------------------------------------------------------------
-        embedding_layer = model.get_input_embeddings()
-        next_token_embed = embedding_layer(
-            torch.tensor([[next_token_id]], device=device)
-        )  # Shape: [1,1,hidden_size]
-
-        with torch.no_grad():
-            outputs = model(
-                inputs_embeds=next_token_embed,
-                past_key_values=past_key_values,
-                use_cache=True,
-                return_dict=True,
-            )
-
-        # Update KV cache for the next iteration
-        past_key_values = outputs.past_key_values
-
-    # ---------------------------------------------------------------------
-    # Decode only the newly generated ids (excluding the prompt)
-    # ---------------------------------------------------------------------
-    generated_text = tokenizer.decode(generated_token_ids, skip_special_tokens=True)
-    
-    if return_token_ids:
-        return generated_text, generated_token_ids
-    return generated_text
 
 def generate_with_embedding_mixture(
     model,
@@ -193,7 +108,6 @@ def generate_with_embedding_mixture(
     phase2_tokens = []
     transition_tokens = []
     phase1_rounds_completed = 0
-    
     # Try to find '</' token id for stopping condition
     end_token_candidates = ['</', 'think']
     end_token_id = None
@@ -427,9 +341,11 @@ def main():
     parser.add_argument('--T_e', type=int, default=200, help='Number of embedding mixture rounds (phase 1)')
     parser.add_argument('--k', type=int, default=5, help='Top-k tokens for mixture in phase 1')
     parser.add_argument('--T_total', type=int, default=600, help='Total number of generation steps for mixture method')
-    parser.add_argument('--num_examples', type=int, default=200, help='Number of GSM8K examples to evaluate')
+    parser.add_argument('--num_examples', type=int, default=50, help='Number of GSM8K examples to evaluate')
     parser.add_argument('--temperature', type=float, default=0.6, help='Sampling temperature')
     parser.add_argument('--experiment_name', type=str, default="answer_directly_element_wise_max", help='Experiment name')
+    parser.add_argument('--model_name', type=str, default="Qwen/Qwen2.5-3B-Instruct", help='Model name')
+    parser.add_argument('--load_from_checkpoint', type=str, default=None, help='Load from checkpoint')
     args = parser.parse_args()
 
     T_e = args.T_e
@@ -440,17 +356,23 @@ def main():
     temperature = args.temperature
     experiment_name = args.experiment_name
     print("Loading model and tokenizer...")
-    model_name = "Qwen/Qwen2.5-3B-Instruct"  # Using Qwen2.5 as it's more readily available
+    model_name = args.model_name  # Using Qwen2.5 as it's more readily available
     
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+    
     
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
         torch_dtype=torch.float16,
         device_map="auto"
     )
+    if args.load_from_checkpoint is not None:
+        model.load_state_dict(torch.load(args.load_from_checkpoint))
+        model.to(torch.bfloat16)
+        model.eval()
+        print(f"Loaded model from checkpoint {args.load_from_checkpoint}")
     
     print("Loading GSM8K dataset...")
     dataset = load_dataset("gsm8k", "main")
@@ -626,12 +548,14 @@ def main():
         }
     }
     
-
-    os.makedirs(f'generation_comparison/{experiment_name}/{T_total}_{num_examples}_{temperature}', exist_ok=True)
+    model_name = model_name.replace("/", "_").replace("-", "_").replace(".", "_")
+    model_name += f"_{args.load_from_checkpoint}" if args.load_from_checkpoint is not None else ""
+    
+    os.makedirs(f'generation_comparison/{experiment_name}/{model_name}/{T_total}_{num_examples}_{temperature}', exist_ok=True)
     # Save as JSON for human readability
-    with open(f'generation_comparison/{experiment_name}/{T_total}_{num_examples}_{temperature}/generation_comparison_T_e_{T_e}_k_{k}.json', 'w') as f:
+    with open(f'generation_comparison/{experiment_name}/{model_name}/{T_total}_{num_examples}_{temperature}/generation_comparison_T_e_{T_e}_k_{k}.json', 'w') as f:
         json.dump(comparison_data, f, indent=2)
-    print(f"Detailed comparison data saved to 'generation_comparison/{experiment_name}/{T_total}_{num_examples}_{temperature}/generation_comparison_T_e_{T_e}_k_{k}.json'")
+    print(f"Detailed comparison data saved to 'generation_comparison/{experiment_name}/{model_name}/{T_total}_{num_examples}_{temperature}/generation_comparison_T_e_{T_e}_k_{k}.json'")
    
 
 if __name__ == "__main__":

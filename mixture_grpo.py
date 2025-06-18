@@ -1,0 +1,910 @@
+import argparse
+import os
+import random
+import re
+import json
+from typing import List, Tuple
+import pdb
+import torch
+import torch.nn.functional as F
+import evaluator
+import wandb
+from datasets import load_dataset
+from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig
+from tqdm import tqdm
+# -----------------------------------------------------------------------------
+# Utility helpers (answer extraction, sampling, log-prob computation)
+# -----------------------------------------------------------------------------
+
+def parse_ground_truth(answer_str: str):
+    """Parse the numerical answer provided by GSM8K."""
+    text = answer_str.split("####")[-1].strip()
+    text = text.replace(",", "").rstrip(". ")
+    try:
+        return float(text)
+    except ValueError:
+        if "/" in text and len(text.split("/")) == 2:
+            num, den = text.split("/")
+            try:
+                return float(num.strip()) / float(den.strip())
+            except ValueError:
+                pass
+    return None
+
+
+
+
+
+
+# -----------------------------------------------------------------------------
+# Embedding-mixture generation (two-phase) – simplified from simple.py
+# -----------------------------------------------------------------------------
+
+def generate_with_embedding_mixture(
+    model,
+    tokenizer,
+    prompt_text: str,
+    *,
+    T_e: int = 50,
+    T_exp: int = 200,
+    k: int = 5,
+    top_p: float = 0.95,
+    temperature: float = 0.6,
+    min_end_prob: float = 0.1,
+    return_phase_info: bool = False,
+    PHASE_2_STRATEGY: str = "vanilla",  
+    experiment_name: str = "non_uniform",
+    max_prompt_length: int = 1024,
+    num_chains: int = 1,
+    max_completion_length: int = 1024,
+) -> str | tuple[str, dict]:
+    """Generate text using a two-phase approach:
+    
+    Phase 1 (T_e rounds): Use weighted mixture of top-k token embeddings
+    Phase 2 (T_exp rounds): Standard token-by-token generation after </think>
+    
+    Args:
+        model: The language model
+        tokenizer: The tokenizer
+        prompt: Input prompt string
+        T_e: Number of embedding mixture rounds
+        T_exp: Number of standard generation rounds after </think>
+        k: Number of top tokens to consider for mixture
+        temperature: Temperature for sampling
+        min_end_prob: Minimum probability for '</' token to stop phase 1
+        return_phase_info: Whether to return detailed phase information
+        num_chains: Number of parallel chains to generate
+    
+    Returns:
+        Generated text (only the new part, without prompt), optionally with phase info
+        For num_chains > 1, returns batched results
+    """
+    device = model.device
+    # Get embedding matrix for efficient lookup
+    embedding_layer = model.get_input_embeddings()
+    embedding_matrix = embedding_layer.weight  # Shape: [vocab_size, hidden_size]
+    
+    # Encode prompt and get initial state - batch for num_chains
+    prompt_inputs = tokenizer(prompt_text, return_tensors="pt", padding=True, padding_side="left", add_special_tokens=False)
+    prompt_ids, prompt_mask = prompt_inputs["input_ids"], prompt_inputs["attention_mask"]
+    prompt_ids = prompt_ids[-max_prompt_length:].to(device)
+    prompt_mask = prompt_mask[-max_prompt_length:].to(device)
+    
+    # Replicate for num_chains
+    input_ids = prompt_ids.repeat(num_chains, 1).to(device)  # [num_chains, seq_len]
+    attention_mask = prompt_mask.repeat(num_chains, 1).to(device)  # [num_chains, seq_len]
+    
+    with torch.no_grad():
+        outputs = model(input_ids=input_ids, attention_mask=attention_mask, use_cache=True, return_dict=True)
+    
+    past_key_values = outputs.past_key_values
+    generated_token_ids = [[] for _ in range(num_chains)]  # List of lists for each chain
+    
+    # Phase tracking for each chain
+    phase1_tokens = [[] for _ in range(num_chains)]
+    phase2_tokens = [[] for _ in range(num_chains)]
+    transition_tokens = [[] for _ in range(num_chains)]
+    phase1_rounds_completed = 0
+    
+    # Try to find '</' token id for stopping condition
+    end_token_candidates = ['</', 'think']
+    end_token_id = None
+    for candidate in end_token_candidates:
+        try:
+            end_token_id = tokenizer.encode(candidate, add_special_tokens=False)[0]
+            break
+        except:
+            continue
+    
+    # Track which chains are still active in phase 1
+    active_chains = torch.ones(num_chains, dtype=torch.bool, device=device)
+    ### Add a <think> token to the generated text
+    
+    # think_start_token = "<think>"
+    # try:
+    #     think_start_ids = tokenizer.encode(think_start_token, add_special_tokens=False)
+    #     for token_id in think_start_ids:
+    #         for chain_idx in range(num_chains):
+    #             generated_token_ids[chain_idx].append(token_id)
+    #             transition_tokens[chain_idx].append(token_id)
+    #         token_embeddings = embedding_layer(
+    #             torch.tensor([[token_id] * num_chains], device=device).T  # [num_chains, 1]
+    #         ).to(embedding_matrix.dtype)
+    #     with torch.no_grad():
+    #         outputs = model(
+    #             inputs_embeds=token_embeddings,
+    #             past_key_values=past_key_values,
+    #             use_cache=True,
+    #             return_dict=True,
+    #         )
+    #     past_key_values = outputs.past_key_values
+    # except:
+    #     print("Warning: Could not add <think> token")
+    # -------------------------------------------------------------------------
+    # Phase 1: Embedding mixture generation for T_e rounds
+    # -------------------------------------------------------------------------
+    print(f"Phase 1: Embedding mixture generation for {T_e} rounds across {num_chains} chains...")
+    
+    for round_idx in range(T_e):
+        if not active_chains.any():
+            break
+            
+        # Get logits from current state for all chains
+        last_logits = outputs.logits[:, -1, :]  # [num_chains, vocab_size]
+        
+        # Apply temperature scaling
+        scaled_logits = last_logits / temperature
+        probs = F.softmax(scaled_logits, dim=-1)  # [num_chains, vocab_size]
+        
+        # Process all chains in parallel
+        # Get top-k tokens and probabilities for all active chains at once
+        top_k_probs, top_k_indices = torch.topk(probs, k, dim=-1)  # [num_chains, k]
+        
+        # Check if end token is in top-k for each chain
+        end_token_mask = (top_k_indices == end_token_id)  # [num_chains, k]
+        has_end_token = end_token_mask.any(dim=-1)  # [num_chains]
+        
+        # Get probabilities of end tokens where they exist
+        for chain_idx in range(num_chains):
+            if has_end_token[chain_idx] and active_chains[chain_idx]:
+                end_pos = end_token_mask[chain_idx].nonzero(as_tuple=True)[0][0]
+                end_prob = top_k_probs[chain_idx, end_pos]
+                # Stop chains that meet the stopping criteria
+                if end_prob >= min_end_prob:
+                    print(f"Stopping Phase 1 for chain {chain_idx} at round {round_idx} due to end token probability: {end_prob:.3f}")
+                    active_chains[chain_idx] = False
+        
+        # Normalize probabilities for all chains
+        normalized_probs = top_k_probs / top_k_probs.sum(dim=-1, keepdim=True)  # [num_chains, k]
+        mixture_weights = torch.distributions.dirichlet.Dirichlet(normalized_probs).sample()  
+        mixture_weights = mixture_weights / mixture_weights.sum()
+        # Get embeddings for top-k tokens for all chains
+        # top_k_indices: [num_chains, k] -> [num_chains, k, hidden_size]
+        top_k_embeddings = embedding_matrix[top_k_indices]  # [num_chains, k, hidden_size]
+        
+        # Compute mixed embeddings for all chains: [num_chains, k, hidden_size] * [num_chains, k, 1] -> [num_chains, hidden_size]
+        mixed_embeddings = torch.sum(
+            top_k_embeddings * mixture_weights.unsqueeze(-1), 
+            dim=-2
+        )  # [num_chains, hidden_size]
+        
+        # For inactive chains, use zero embeddings
+        mixed_embeddings[~active_chains] = 0.0
+        
+        # Sample tokens for tracking (vectorized)
+        sampled_token_indices = torch.multinomial(normalized_probs, num_samples=1).squeeze(-1)  # [num_chains]
+        actual_token_ids = top_k_indices.gather(-1, sampled_token_indices.unsqueeze(-1)).squeeze(-1)  # [num_chains]
+        
+        # Store tracking info for active chains
+        for chain_idx in range(num_chains):
+            if active_chains[chain_idx]:
+                actual_token_id = actual_token_ids[chain_idx].item()
+                generated_token_ids[chain_idx].append(actual_token_id)
+                phase1_tokens[chain_idx].append((top_k_indices[chain_idx].tolist(), normalized_probs[chain_idx].tolist()))
+        
+        # Prepare batch embeddings with proper shape
+        mixed_embeddings_batch = mixed_embeddings.unsqueeze(1)  # [num_chains, 1, hidden_size]
+        # Ensure the batch has the correct dtype
+        mixed_embeddings_batch = mixed_embeddings_batch.to(embedding_matrix.dtype)
+        
+        # Feed mixed embeddings back to model
+        with torch.no_grad():
+            outputs = model(
+                inputs_embeds=mixed_embeddings_batch,
+                past_key_values=past_key_values,
+                use_cache=True,
+                return_dict=True,
+            )
+        
+        past_key_values = outputs.past_key_values
+        phase1_rounds_completed += 1
+    
+    # -------------------------------------------------------------------------
+    # Add </think> token for all chains
+    # -------------------------------------------------------------------------
+    think_end_token = "</think>"
+    try:
+        think_end_ids = tokenizer.encode(think_end_token, add_special_tokens=False)
+        for token_id in think_end_ids:
+            for chain_idx in range(num_chains):
+                generated_token_ids[chain_idx].append(token_id)
+                transition_tokens[chain_idx].append(token_id)
+                
+            # Feed the actual token embedding for all chains
+            token_embeddings = embedding_layer(
+                torch.tensor([[token_id] * num_chains], device=device).T  # [num_chains, 1]
+            ).to(embedding_matrix.dtype)
+            
+            with torch.no_grad():
+                outputs = model(
+                    inputs_embeds=token_embeddings,
+                    past_key_values=past_key_values,
+                    use_cache=True,
+                    return_dict=True,
+                )
+            past_key_values = outputs.past_key_values
+    except:
+        print("Warning: Could not add </think> token")
+    
+    # -------------------------------------------------------------------------
+    # Set temperature for phase 2 to 0.6 for more focused generation
+    # -------------------------------------------------------------------------
+    phase2_temperature = 0.6
+    print(f"Setting temperature for Phase 2 to {phase2_temperature}")
+    
+    # -------------------------------------------------------------------------
+    # Add transition tokens (<think> or <answer>) for phase 2
+    # -------------------------------------------------------------------------
+    if PHASE_2_STRATEGY == "think_first":
+        think_start_token = "<think>"
+        try:
+            think_start_ids = tokenizer.encode(think_start_token, add_special_tokens=False)
+            for token_id in think_start_ids:
+                for chain_idx in range(num_chains):
+                    generated_token_ids[chain_idx].append(token_id)
+                    transition_tokens[chain_idx].append(token_id)
+                
+                # Feed the actual token embedding for all chains
+                token_embeddings = embedding_layer(
+                    torch.tensor([[token_id] * num_chains], device=device).T
+                ).to(embedding_matrix.dtype)
+                
+                with torch.no_grad():
+                    outputs = model(
+                        inputs_embeds=token_embeddings,
+                        past_key_values=past_key_values,
+                        use_cache=True,
+                        return_dict=True,
+                    )
+                past_key_values = outputs.past_key_values
+        except:
+            print("Warning: Could not add <think> token")
+    
+    elif PHASE_2_STRATEGY == "answer_first":
+        answer_start_token = "<answer>"
+        try:
+            answer_start_ids = tokenizer.encode(answer_start_token, add_special_tokens=False)
+            for token_id in answer_start_ids:
+                for chain_idx in range(num_chains):
+                    generated_token_ids[chain_idx].append(token_id)
+                    transition_tokens[chain_idx].append(token_id)
+                
+                # Feed the actual token embedding for all chains
+                token_embeddings = embedding_layer(
+                    torch.tensor([[token_id] * num_chains], device=device).T
+                ).to(embedding_matrix.dtype)
+                
+                with torch.no_grad():
+                    outputs = model(
+                        inputs_embeds=token_embeddings,
+                        past_key_values=past_key_values,
+                        use_cache=True,
+                        return_dict=True,
+                    )
+                past_key_values = outputs.past_key_values
+        except:
+            print("Warning: Could not add <answer> token")
+    
+    # -------------------------------------------------------------------------
+    # Phase 2: Standard token-by-token generation for T_exp rounds
+    # -------------------------------------------------------------------------
+    print(f"Phase 2: Standard generation for {T_exp} rounds across {num_chains} chains...")
+    
+    # Track which chains are still generating (not EOS)
+    generating_chains = torch.ones(num_chains, dtype=torch.bool, device=device)
+    
+    for _ in range(T_exp):
+        if not generating_chains.any():
+            break
+            
+        # Standard sampling from logits for all chains
+        last_logits = outputs.logits[:, -1, :]  # [num_chains, vocab_size]
+        scaled_logits = last_logits / phase2_temperature
+        probs = F.softmax(scaled_logits, dim=-1)  # [num_chains, vocab_size]
+        
+        # Sample next tokens for all chains
+        next_token_ids = torch.multinomial(probs, num_samples=1).squeeze(-1)  # [num_chains]
+        
+        # Update generated tokens and check for EOS
+        token_embeddings_list = []
+        for chain_idx in range(num_chains):
+            next_token_id = next_token_ids[chain_idx].item()
+            
+            if generating_chains[chain_idx]:
+                generated_token_ids[chain_idx].append(next_token_id)
+                phase2_tokens[chain_idx].append(next_token_id)
+                
+                # Check for EOS
+                if next_token_id == tokenizer.eos_token_id:
+                    generating_chains[chain_idx] = False
+            
+            # Get token embedding (even for stopped chains to maintain batch shape)
+            token_embedding = embedding_layer(
+                torch.tensor([[next_token_id]], device=device)
+            ).squeeze(0).to(embedding_matrix.dtype)  # [1, hidden_size]
+            token_embeddings_list.append(token_embedding)
+        
+        # Stack token embeddings for batch processing
+        token_embeddings_batch = torch.stack(token_embeddings_list, dim=0)  # [num_chains, 1, hidden_size]
+        
+        # Feed token embeddings back
+        with torch.no_grad():
+            outputs = model(
+                inputs_embeds=token_embeddings_batch,
+                past_key_values=past_key_values,
+                use_cache=True,
+                return_dict=True,
+            )
+        
+        past_key_values = outputs.past_key_values
+    
+    # -------------------------------------------------------------------------
+    # Process results for all chains
+    # -------------------------------------------------------------------------
+    batched_prompt_completion_ids = []
+    batched_prompt_ids = []
+    batched_generated_ids = []
+    batched_attention_masks = []
+    batched_generated_text = []
+    batched_phase_info = []
+    
+    for chain_idx in range(num_chains):
+        # Decode generated tokens for this chain
+        generated_text = tokenizer.decode(generated_token_ids[chain_idx], skip_special_tokens=True)
+        # print(generated_text)
+        batched_generated_text.append(generated_text)
+        
+        # Tensorify the generated token ids
+        chain_generated_ids = torch.tensor(generated_token_ids[chain_idx], device=device).reshape(1, -1)
+        
+        # Masking for this chain
+        is_eos = chain_generated_ids == tokenizer.eos_token_id
+        if is_eos.any():
+            eos_idx = is_eos.int().argmax()
+        else:
+            eos_idx = chain_generated_ids.size(1) - 1
+            
+        sequence_indices = torch.arange(max_completion_length, device=device).reshape(1, -1)
+        completion_mask = (sequence_indices <= eos_idx).int().to(device)
+        
+        # Use the original single prompt for each chain
+        # prompt_mask and prompt_ids need to have batch dimension for concatenation
+        chain_prompt_mask = prompt_mask.unsqueeze(0) if prompt_mask.dim() == 1 else prompt_mask
+        chain_prompt_ids = prompt_ids.unsqueeze(0) if prompt_ids.dim() == 1 else prompt_ids
+        
+        chain_attention_mask = torch.cat([chain_prompt_mask, completion_mask], dim=1)
+        chain_prompt_completion_ids = torch.cat([chain_prompt_ids, chain_generated_ids], dim=1).to(device)
+        
+        # Pad to same length as attention mask
+        if chain_prompt_completion_ids.size(1) < chain_attention_mask.size(1):
+            padding_length = chain_attention_mask.size(1) - chain_prompt_completion_ids.size(1)
+            padding = torch.full((1, padding_length), tokenizer.pad_token_id, device=device)
+            chain_prompt_completion_ids = torch.cat([chain_prompt_completion_ids, padding], dim=1)
+        
+        # Collect tensors for batching
+        batched_prompt_completion_ids.append(chain_prompt_completion_ids)
+        batched_prompt_ids.append(chain_prompt_ids)
+        batched_generated_ids.append(chain_generated_ids)
+        batched_attention_masks.append(chain_attention_mask)
+        
+        if return_phase_info:
+            phase_info = {
+                'total_tokens': len(generated_token_ids[chain_idx]),
+                'phase1_tokens': len(phase1_tokens[chain_idx]),
+                'phase2_tokens': len(phase2_tokens[chain_idx]),
+                'transition_tokens': len(transition_tokens[chain_idx]),
+                'phase1_rounds_completed': phase1_rounds_completed,
+                'phase1_rounds_requested': T_e,
+                'phase2_rounds_requested': T_exp,
+                'phase1_token_ids': phase1_tokens[chain_idx],
+                'phase2_token_ids': phase2_tokens[chain_idx],
+                'transition_token_ids': transition_tokens[chain_idx],
+            }
+            batched_phase_info.append(phase_info)
+    
+    # Find maximum sequence length for padding
+    max_seq_len = max(tensor.size(1) for tensor in batched_prompt_completion_ids)
+    max_prompt_len = max(tensor.size(1) for tensor in batched_prompt_ids)
+    max_gen_len = max(tensor.size(1) for tensor in batched_generated_ids)
+    max_attention_len = max(tensor.size(1) for tensor in batched_attention_masks)
+    
+    # Pad all tensors to the same length and batch them
+    def pad_and_batch_tensors(tensor_list, max_len, pad_token_id=tokenizer.pad_token_id):
+        padded_tensors = []
+        for tensor in tensor_list:
+            if tensor.size(1) < max_len:
+                padding = torch.full((1, max_len - tensor.size(1)), pad_token_id, device=device)
+                padded_tensor = torch.cat([tensor, padding], dim=1)
+            else:
+                padded_tensor = tensor
+            padded_tensors.append(padded_tensor)
+        return torch.cat(padded_tensors, dim=0)  # Stack along batch dimension
+    
+    # Batch all tensors
+    final_prompt_completion_ids = pad_and_batch_tensors(batched_prompt_completion_ids, max_seq_len)
+    final_prompt_ids = pad_and_batch_tensors(batched_prompt_ids, max_prompt_len)
+    final_generated_ids = pad_and_batch_tensors(batched_generated_ids, max_gen_len)
+    final_attention_mask = pad_and_batch_tensors(batched_attention_masks, max_attention_len, pad_token_id=0)
+    
+    # For variables that are the same across chains, copy them
+    batched_prompt_text = [prompt_text] * num_chains
+    
+    if return_phase_info:
+        return final_prompt_completion_ids, final_prompt_ids, final_generated_ids, final_attention_mask, batched_generated_text, batched_phase_info
+    else:
+        return final_prompt_completion_ids, final_prompt_ids, final_generated_ids, final_attention_mask, batched_generated_text, batched_prompt_text
+
+# -----------------------------------------------------------------------------
+# Log-prob utilities for GRPO
+# -----------------------------------------------------------------------------
+
+def get_per_token_logps(model, input_ids: torch.Tensor, attention_mask: torch.Tensor, logits_to_keep: int) -> torch.Tensor:
+    """Return log-probabilities for the completion tokens.
+
+    Shapes:
+        input_ids – (B, L)
+        attention_mask – (B, L)
+    Returns:
+        logps – (B, L-1)
+    """
+    outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+    logits = outputs.logits  # (B, L, V)
+    logits = logits[:, -logits_to_keep:, :]
+    labels = input_ids[:, -logits_to_keep:]
+
+    # Handle potential inf/nan in logits (use safe value for float16)
+    # logits = torch.where(torch.isfinite(logits), logits, torch.full_like(logits, -65000.0))
+    
+    logps = F.log_softmax(logits, dim=-1).gather(-1, labels.unsqueeze(-1)).squeeze(-1)
+    return logps
+
+
+# -----------------------------------------------------------------------------
+# GRPO loss (minimal version)
+# -----------------------------------------------------------------------------
+def score_completions(
+    completions_text: list[str],
+    question: str,
+    answer: str,
+    eval_class: evaluator.RewardEvaluator,
+    device: str,
+    args: argparse.Namespace,
+    current_step: int
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict[str, float], dict]:
+    """
+    Score model completions and compute advantages for training.
+    
+    Args:
+        completions_text: List of generated completion strings
+        question: Original input question/prompt
+        answer: Ground truth answer
+        eval_class: Evaluator class for computing rewards
+        device: Device to place tensors on
+        args: Training arguments
+        
+    Returns:
+        rewards: Raw reward scores for each completion
+        advantages: Computed advantages for policy gradient
+        rewards_per_func: Rewards broken down by individual reward functions
+        metrics: Dictionary of aggregated metrics
+        log_data: Dictionary containing detailed generation and scoring data
+    """
+    # Build log data dictionary
+    log_data = {
+        'prompt': {
+            'text': question,
+            'answer': answer
+        },
+        'generations': []
+    }
+
+    # Format inputs as expected by evaluator
+    mock_prompts = [[{'content': question}]] * len(completions_text)
+    mock_completions = [[{'content': completion}] for completion in completions_text]
+    answers = [answer] * len(completions_text)
+    
+    # Get rewards and metrics from evaluator
+    rewards_per_func, metrics = eval_class.compute_rewards(
+        prompts=mock_prompts,
+        completions=mock_completions,
+        answer=answers,
+        device=device
+    )
+    rewards = rewards_per_func.sum(dim=1)
+    # Store generation data
+    for i, (completion, reward_scores) in enumerate(zip(completions_text, rewards_per_func)):
+        generation_data = {
+            'response': completion,
+            'scores': {
+                **eval_class.get_reward_breakdown(reward_scores),
+                'total_reward': rewards[i].item()
+            }
+        }
+        log_data['generations'].append(generation_data)
+    ### store the generations in a txt file for each step
+    os.makedirs(f"training_logs/run_{args.current_run}/logs", exist_ok=True)
+    with open(f"training_logs/run_{args.current_run}/logs/generations_{current_step}.txt", "a") as f:
+        for generation in log_data['generations']:
+            f.write(f"--------------------------------\n")
+            f.write(f"Question: {question}\n")
+            f.write(f"{generation['response']}\n")
+            f.write(f"{generation['scores']}\n")
+            f.write("\n")
+
+    # Compute advantages
+    mean_grouped_rewards = rewards.view(-1, args.num_chains).mean(dim=1)
+    std_grouped_rewards = rewards.view(-1, args.num_chains).std(dim=1)
+
+    mean_grouped_rewards = mean_grouped_rewards.repeat_interleave(args.num_chains, dim=0)
+    std_grouped_rewards = std_grouped_rewards.repeat_interleave(args.num_chains, dim=0)
+
+    advantages = (rewards - mean_grouped_rewards) / (std_grouped_rewards + 1e-4)
+    metrics["reward_std"] = std_grouped_rewards.mean().item()
+
+    # Store summary statistics
+    log_data['summary_stats'] = {
+        'mean_rewards_per_group': mean_grouped_rewards.tolist(),
+        'std_rewards_per_group': std_grouped_rewards.tolist(),
+        'advantages': advantages.tolist()
+    }
+    # pdb.set_trace()
+    return rewards, advantages, rewards_per_func, metrics, log_data
+
+def compute_loss(
+    model: AutoModelForCausalLM,
+    base_model: AutoModelForCausalLM, 
+    prompt_completion_ids: torch.Tensor,
+    prompt_ids: torch.Tensor,
+    completion_ids: torch.Tensor,
+    attention_mask: torch.Tensor,
+    completion_mask: torch.Tensor,
+    advantages: torch.Tensor,
+    args: argparse.Namespace
+) -> tuple[torch.Tensor, dict[str, float]]:
+    """
+    Compute the GRPO loss between current and base model.
+    
+    Args:
+        model: The current model being trained
+        base_model: The reference model to compare against
+        prompt_completion_ids: Combined prompt and completion token IDs
+        prompt_ids: Token IDs for just the prompt
+        completion_ids: Token IDs for just the completion
+        attention_mask: Attention mask for the full sequence
+        completion_mask: Mask indicating which tokens are from the completion
+        advantages: Advantage values for each sequence
+        args: Training arguments
+        
+    Returns:
+        loss: The computed GRPO loss
+        metrics: Dictionary containing additional metrics like KL divergence
+    """
+
+    # Only need the generated tokens' logits
+    logits_to_keep = completion_mask.size(1)
+    # Get reference model logits
+    with torch.inference_mode():
+        ref_per_token_logps = get_per_token_logps(base_model, prompt_completion_ids, attention_mask,logits_to_keep)
+
+    # Get training model logits
+    input_ids = prompt_completion_ids#ß torch.cat([prompt_ids, completion_ids], dim=1)
+    per_token_logps = get_per_token_logps(model, input_ids, attention_mask,logits_to_keep)
+
+    # Compute KL divergence
+    per_token_kl = torch.exp(ref_per_token_logps - per_token_logps) - (ref_per_token_logps - per_token_logps) - 1
+
+    # Compute loss with advantages
+    per_token_loss = torch.exp(per_token_logps - per_token_logps.detach()) * advantages.unsqueeze(1)
+    per_token_loss = -(per_token_loss - args.kl_weight_beta * per_token_kl)
+    loss = ((per_token_loss * completion_mask).sum(dim=1) / completion_mask.sum(dim=1)).mean()
+
+    # Additional metrics
+    metrics = {}
+    response_length = completion_mask.sum(1).float().mean().item()
+    metrics["response_length"] = response_length
+    mean_kl = ((per_token_kl * completion_mask).sum(dim=1) / completion_mask.sum(dim=1)).mean()
+    metrics["kl"] = mean_kl.item()
+
+    return loss, metrics
+
+def grpo_loss(
+        model: AutoModelForCausalLM,
+        base_model: AutoModelForCausalLM,
+        tokenizer: AutoTokenizer,
+        question: str,
+        answer: str,
+        eval_class: evaluator.RewardEvaluator,
+        device: str,
+        round_num: int,
+        training_log_dir: str, 
+        arguments: argparse.Namespace
+) -> tuple[torch.Tensor, dict[str, float], float]:
+    """
+    Compute GRPO loss between the current model and base model.
+    
+    Args:
+        model: The current model being trained
+        base_model: The reference model to compare against
+        tokenizer: Tokenizer for the models
+        question: Input question/prompt
+        answer: Ground truth answer
+        eval_class: Evaluator for computing rewards
+        device: Device to run on ('cpu' or 'cuda')
+        round_num: Current training round number
+        training_log_dir: Directory to save training logs
+        args: Training arguments
+        
+    Returns:
+        loss: The computed GRPO loss
+        metrics: Dictionary containing training metrics
+        reward: The total reward for this batch
+    """
+    # Generate completions
+    prompt_text = create_prompt(tokenizer, question)
+    prompt_completion_ids, prompt_ids, completion_ids, attention_mask, completions_text, prompt_text = generate_with_embedding_mixture(
+            model, tokenizer, prompt_text, num_chains=arguments.num_chains, T_e=arguments.T_e, T_exp= int(arguments.T - arguments.T_e), temperature=arguments.temperature,k=arguments.k
+        )
+    arguments.kl_weight_beta = 0.02
+    # Score completions
+    rewards, advantages, rewards_per_func, metrics, log_data = score_completions(
+        completions_text, question, answer, eval_class, device, arguments, round_num
+    )
+
+    # Compute loss
+    
+
+    completion_mask = attention_mask[:, prompt_ids.size(1):]
+    loss, loss_metrics = compute_loss(
+        model, base_model, prompt_completion_ids, prompt_ids, completion_ids,
+        attention_mask, completion_mask, advantages, arguments
+    )
+
+    # Combine metrics
+    metrics.update(loss_metrics)
+
+    return loss, metrics, rewards, advantages, rewards_per_func, log_data
+
+# -----------------------------------------------------------------------------
+# Training utilities
+# -----------------------------------------------------------------------------
+
+def create_prompt(tokenizer: AutoTokenizer, question: str) -> str:
+    pre_prompt = """You will be given a question that involves reasoning. You should reason carefully about the question, then provide your answer.
+            It is very important that you put your reasoning process inside <think> tags and your final answer inside <answer> tags, like this:
+            <think>
+            Your step-by-step reasoning process here
+            </think>
+            <answer>
+            Your final answer here
+            </answer>"""
+    prompt = tokenizer.apply_chat_template(
+        [
+            {"role": "system", "content": pre_prompt},
+            {"role": "user", "content": f"Question: {question}"},
+        ],
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+    pdb.set_trace()
+    return prompt
+
+# -----------------------------------------------------------------------------
+# Main training / evaluation script
+# -----------------------------------------------------------------------------
+def parse_args():
+    parser = argparse.ArgumentParser("Embedding-mixture GRPO demo")
+    ###### Arguments for model ######
+    parser.add_argument("--model", type=str, default="Qwen/Qwen2.5-1.5B-Instruct")
+    parser.add_argument("--device", type=str, default="cuda")
+    parser.add_argument("--temperature", type=float, default=0.6)
+
+    ###### Arguments for training ######
+    parser.add_argument("--steps", type=int, default=1000, help="Number of GRPO updates (demo)")
+    parser.add_argument("--lr", type=float, default=5e-6)
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
+    parser.add_argument("--max_grad_norm", type=float, default=0.1)
+    ###### Arguments for GRPO ######
+    parser.add_argument("--kl_beta", type=float, default=0.02)
+    parser.add_argument("--warmup_percent", type=float, default=0.18)
+    parser.add_argument("--num_chains", type=int, default=10)
+    ###### Arguments for updating reference model ######
+    parser.add_argument("--update_ref_model", action="store_true")
+    parser.add_argument("--update_ref_model_freq", type=int, default=200)
+    parser.add_argument("--ref_model_mixup_alpha", type=float, default=0.1)
+    ###### Arguments for embedding mixture ######
+    parser.add_argument("--k", type=int, default=2)
+    parser.add_argument("--T_e", type=int, default=400)
+    parser.add_argument("--T",type=int,default=1000)
+    parser.add_argument("--experiment_name",type=str,default="non_uniform")
+
+    #### get last run 
+    os.makedirs("training_logs", exist_ok=True)
+    last_run = sorted(os.listdir("training_logs"))[-1]
+    current_run = int(last_run.split("_")[-1])+1
+    
+    # wandb arguments
+    parser.add_argument("--wandb_project", type=str, default="grpo-gsm8k-mix")
+    parser.add_argument("--wandb_entity", type=str, default="aditjain1980-cornell-university")
+    parser.add_argument("--wandb_log", action="store_true", default=True, help="Log to wandb")
+    args = parser.parse_args()
+    args.current_run = current_run
+    args.wandb_run_name = f"grpo-gsm8k-mix_{current_run}_model_{args.model.split('/')[-1]}_k_{args.k}"
+    
+    return args
+
+def main():
+    args = parse_args()
+    WANDB_LOG = args.wandb_log
+
+    # Initialize wandb
+    if WANDB_LOG:
+        wandb.init(
+            project=args.wandb_project,
+            name=args.wandb_run_name,
+            entity=args.wandb_entity,
+            config=vars(args),
+            tags=["grpo", "embedding-mixture", args.model.split("/")[-1]]
+        )
+        
+        # Log additional config
+        wandb.config.update({
+            "T_exp": args.T - args.T_e,
+        })
+    
+    T_e = args.T_e
+    T_exp = args.T - T_e
+    random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = True
+    torch.set_float32_matmul_precision('high') 
+
+    tokenizer = AutoTokenizer.from_pretrained(args.model)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    model = AutoModelForCausalLM.from_pretrained(args.model, torch_dtype=torch.bfloat16, device_map="auto")
+    ref_model = AutoModelForCausalLM.from_pretrained(args.model, torch_dtype=torch.bfloat16, device_map="auto")
+    model.train()
+    
+
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=args.lr,
+        betas=(0.9, 0.99),
+        weight_decay=0.01,
+        eps=1e-8
+    )
+
+    warmup_steps = int(args.warmup_percent * args.steps)
+    def get_lr(step):
+        if step < warmup_steps:
+            return (step / warmup_steps)
+        return 1.0
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer,lr_lambda=get_lr)
+
+
+    # small subset of GSM8K train split
+    ds = load_dataset("gsm8k", "main", split="train[:10%]")
+    accumulated_loss = 0
+    optimizer.zero_grad()
+    
+    # Create training logs directory
+    os.makedirs("training_logs", exist_ok=True)
+    
+    for step in tqdm(range(args.steps), desc="Training Progress"):
+        sample = ds[random.randint(0, len(ds) - 1)]
+        question = sample["question"]
+        gt_val = parse_ground_truth(sample["answer"])
+        
+        if args.update_ref_model and (step+1) % args.update_ref_model_freq == 0:
+            with torch.no_grad():
+                for param, ref_param in zip(model.parameters(), ref_model.parameters()):
+                    ref_param.data = args.ref_model_mixup_alpha * param.data + (1 - args.ref_model_mixup_alpha) * ref_param.data
+
+
+        # compute reward
+        loss, metrics, rewards, advantages, rewards_per_func, log_data = grpo_loss(
+            model,
+            ref_model,
+            tokenizer,
+            question,
+            gt_val,
+            evaluator.GSM8kEvaluator(),
+            args.device,
+            step,
+            "training_logs",
+            args
+        )
+        print(f"--------------------------------")
+        print(f"loss: {loss}    rewards: {rewards} advantages: {advantages} rewards_per_func: {rewards_per_func}")
+        print(f"--------------------------------")
+
+        
+        # Gradient accumulation
+        total_loss = loss # / args.gradient_accumulation_steps
+        total_loss.backward()
+        accumulated_loss += loss.item()   
+        scheduler.step()
+
+        # Step optimizer
+        if (step + 1) % args.gradient_accumulation_steps == 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
+            optimizer.step()
+            optimizer.zero_grad()    
+            accumulated_loss = 0
+
+        print(f"Step {step:3d} | Loss: {loss.item():.4f} | GT: {gt_val}")
+        torch.cuda.empty_cache()
+        # Log to wandb
+        if WANDB_LOG:
+            wandb_log = {
+                "train/loss": loss.item(),
+                "train/step": step,
+                "train/learning_rate": scheduler.get_last_lr()[0],
+                "train/gt_value": gt_val,
+                **{f"train/{k}": v for k, v in metrics.items()},
+                "train/mean_reward": rewards.mean().item(),
+                "train/std_reward": rewards.std().item(),
+                "train/max_reward": rewards.max().item(),
+                "train/min_reward": rewards.min().item(),
+                "train/mean_advantage": advantages.mean().item(),
+                "train/std_advantage": advantages.std().item(),
+            }
+            
+            # Log individual reward components if available
+            if rewards_per_func is not None and len(rewards_per_func.shape) > 1:
+                for i in range(rewards_per_func.shape[1]):
+                    wandb_log[f"train/reward_component_{i}"] = rewards_per_func[:, i].mean().item()
+            
+            # Log sample generation every 50 steps
+            if step % 50 == 0 and len(log_data['generations']) > 0:
+                # Create a table with generations
+                generation_data = []
+                for i, gen in enumerate(log_data['generations'][:3]):  # Log first 3 generations
+                    generation_data.append([
+                        step,
+                        i,
+                        question[:100] + "..." if len(question) > 100 else question,
+                        gen['response'][:200] + "..." if len(gen['response']) > 200 else gen['response'],
+                        gen['scores']['total_reward'],
+                        gt_val
+                    ])
+                
+                generations_table = wandb.Table(
+                    columns=["step", "chain_id", "question", "response", "reward", "ground_truth"],
+                    data=generation_data
+                )
+                wandb_log["train/generations"] = generations_table
+            
+            wandb.log(wandb_log, step=step)
+        
+        ##### log data #####
+        with open(f"training_logs/run_{args.current_run}/log_data.json", "a") as f:
+            json.dump(log_data, f)
+            f.write('\n')  # Add newline for easier reading
+    ### save model ####
+    torch.save(model.state_dict(), f"training_logs/run_{args.current_run}/model.pt")
+
+if __name__ == "__main__":
+    main() 

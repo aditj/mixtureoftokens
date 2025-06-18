@@ -125,6 +125,8 @@ def generate_with_embedding_mixture(
         else:
             if "inverse_p" in experiment_name:
                 normalized_probs = 1 / top_k_probs
+            elif "uniform_only" in experiment_name:
+                normalized_probs = torch.ones_like(top_k_probs) / len(top_k_probs)
             else:
                 normalized_probs = top_k_probs / top_k_probs.sum()
                 
