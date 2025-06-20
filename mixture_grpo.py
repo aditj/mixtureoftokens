@@ -39,7 +39,6 @@ def parse_ground_truth(answer_str: str):
 # -----------------------------------------------------------------------------
 # Embedding-mixture generation (two-phase) – simplified from simple.py
 # -----------------------------------------------------------------------------
-
 def generate_with_embedding_mixture(
     model,
     tokenizer,
@@ -48,191 +47,69 @@ def generate_with_embedding_mixture(
     T_e: int = 50,
     T_exp: int = 200,
     k: int = 5,
-    top_p: float = 0.95,
     temperature: float = 0.6,
-    min_end_prob: float = 0.1,
+    min_end_prob: float = 0.3,
     return_phase_info: bool = False,
     PHASE_2_STRATEGY: str = "vanilla",  
-    experiment_name: str = "non_uniform",
     max_prompt_length: int = 1024,
     num_chains: int = 1,
     max_completion_length: int = 1024,
 ) -> str | tuple[str, dict]:
-    """Generate text using a two-phase approach:
     
-    Phase 1 (T_e rounds): Use weighted mixture of top-k token embeddings
-    Phase 2 (T_exp rounds): Standard token-by-token generation after </think>
-    
-    Args:
-        model: The language model
-        tokenizer: The tokenizer
-        prompt: Input prompt string
-        T_e: Number of embedding mixture rounds
-        T_exp: Number of standard generation rounds after </think>
-        k: Number of top tokens to consider for mixture
-        temperature: Temperature for sampling
-        min_end_prob: Minimum probability for '</' token to stop phase 1
-        return_phase_info: Whether to return detailed phase information
-        num_chains: Number of parallel chains to generate
-    
-    Returns:
-        Generated text (only the new part, without prompt), optionally with phase info
-        For num_chains > 1, returns batched results
-    """
     device = model.device
-    # Get embedding matrix for efficient lookup
     embedding_layer = model.get_input_embeddings()
-    embedding_matrix = embedding_layer.weight  # Shape: [vocab_size, hidden_size]
+    embedding_matrix = embedding_layer.weight
     
-    # Encode prompt and get initial state - batch for num_chains
+    # Encode prompt
     prompt_inputs = tokenizer(prompt_text, return_tensors="pt", padding=True, padding_side="left", add_special_tokens=False)
     prompt_ids, prompt_mask = prompt_inputs["input_ids"], prompt_inputs["attention_mask"]
     prompt_ids = prompt_ids[-max_prompt_length:].to(device)
     prompt_mask = prompt_mask[-max_prompt_length:].to(device)
     
     # Replicate for num_chains
-    input_ids = prompt_ids.repeat(num_chains, 1).to(device)  # [num_chains, seq_len]
-    attention_mask = prompt_mask.repeat(num_chains, 1).to(device)  # [num_chains, seq_len]
+    input_ids = prompt_ids.repeat(num_chains, 1).to(device)
+    attention_mask = prompt_mask.repeat(num_chains, 1).to(device)
     
+    # Get initial state
     with torch.no_grad():
         outputs = model(input_ids=input_ids, attention_mask=attention_mask, use_cache=True, return_dict=True)
-    
     past_key_values = outputs.past_key_values
-    generated_token_ids = [[] for _ in range(num_chains)]  # List of lists for each chain
     
-    # Phase tracking for each chain
+    # Initialize tracking
+    generated_token_ids = [[] for _ in range(num_chains)]
     phase1_tokens = [[] for _ in range(num_chains)]
     phase2_tokens = [[] for _ in range(num_chains)]
     transition_tokens = [[] for _ in range(num_chains)]
-    phase1_rounds_completed = 0
     
-    # Try to find '</' token id for stopping condition
-    end_token_candidates = ['</', 'think']
+    # State tracking arrays
+    active_chains = torch.ones(num_chains, dtype=torch.bool, device=device)  # True for mixture, False for sampling
+    running_chains = torch.ones(num_chains, dtype=torch.bool, device=device)  # True if not stopped by EOS
+    chain_lengths = torch.zeros(num_chains, dtype=torch.long, device=device)  # How long each chain ran
+    
+    # Find end token for stopping condition
     end_token_id = None
-    for candidate in end_token_candidates:
+    for candidate in ['</', 'think']:
         try:
             end_token_id = tokenizer.encode(candidate, add_special_tokens=False)[0]
             break
         except:
             continue
     
-    # Track which chains are still active in phase 1
-    active_chains = torch.ones(num_chains, dtype=torch.bool, device=device)
-    ### Add a <think> token to the generated text
+    def obtain_probs_from_logits(logits, temp):
+        """Helper function to get probabilities from logits with temperature"""
+        scaled_logits = logits / temp
+        return F.softmax(scaled_logits, dim=-1)
     
-    # think_start_token = "<think>"
-    # try:
-    #     think_start_ids = tokenizer.encode(think_start_token, add_special_tokens=False)
-    #     for token_id in think_start_ids:
-    #         for chain_idx in range(num_chains):
-    #             generated_token_ids[chain_idx].append(token_id)
-    #             transition_tokens[chain_idx].append(token_id)
-    #         token_embeddings = embedding_layer(
-    #             torch.tensor([[token_id] * num_chains], device=device).T  # [num_chains, 1]
-    #         ).to(embedding_matrix.dtype)
-    #     with torch.no_grad():
-    #         outputs = model(
-    #             inputs_embeds=token_embeddings,
-    #             past_key_values=past_key_values,
-    #             use_cache=True,
-    #             return_dict=True,
-    #         )
-    #     past_key_values = outputs.past_key_values
-    # except:
-    #     print("Warning: Could not add <think> token")
-    # -------------------------------------------------------------------------
-    # Phase 1: Embedding mixture generation for T_e rounds
-    # -------------------------------------------------------------------------
-    print(f"Phase 1: Embedding mixture generation for {T_e} rounds across {num_chains} chains...")
-    
-    for round_idx in range(T_e):
-        if not active_chains.any():
-            break
-            
-        # Get logits from current state for all chains
-        last_logits = outputs.logits[:, -1, :]  # [num_chains, vocab_size]
-        
-        # Apply temperature scaling
-        scaled_logits = last_logits / temperature
-        probs = F.softmax(scaled_logits, dim=-1)  # [num_chains, vocab_size]
-        
-        # Process all chains in parallel
-        # Get top-k tokens and probabilities for all active chains at once
-        top_k_probs, top_k_indices = torch.topk(probs, k, dim=-1)  # [num_chains, k]
-        
-        # Check if end token is in top-k for each chain
-        end_token_mask = (top_k_indices == end_token_id)  # [num_chains, k]
-        has_end_token = end_token_mask.any(dim=-1)  # [num_chains]
-        
-        # Get probabilities of end tokens where they exist
-        for chain_idx in range(num_chains):
-            if has_end_token[chain_idx] and active_chains[chain_idx]:
-                end_pos = end_token_mask[chain_idx].nonzero(as_tuple=True)[0][0]
-                end_prob = top_k_probs[chain_idx, end_pos]
-                # Stop chains that meet the stopping criteria
-                if end_prob >= min_end_prob:
-                    print(f"Stopping Phase 1 for chain {chain_idx} at round {round_idx} due to end token probability: {end_prob:.3f}")
-                    active_chains[chain_idx] = False
-        
-        # Normalize probabilities for all chains
-        normalized_probs = top_k_probs / top_k_probs.sum(dim=-1, keepdim=True)  # [num_chains, k]
-        mixture_weights = torch.distributions.dirichlet.Dirichlet(normalized_probs).sample()  
-        mixture_weights = mixture_weights / mixture_weights.sum()
-        # Get embeddings for top-k tokens for all chains
-        # top_k_indices: [num_chains, k] -> [num_chains, k, hidden_size]
-        top_k_embeddings = embedding_matrix[top_k_indices]  # [num_chains, k, hidden_size]
-        
-        # Compute mixed embeddings for all chains: [num_chains, k, hidden_size] * [num_chains, k, 1] -> [num_chains, hidden_size]
-        mixed_embeddings = torch.sum(
-            top_k_embeddings * mixture_weights.unsqueeze(-1), 
-            dim=-2
-        )  # [num_chains, hidden_size]
-        
-        # For inactive chains, use zero embeddings
-        mixed_embeddings[~active_chains] = 0.0
-        
-        # Sample tokens for tracking (vectorized)
-        sampled_token_indices = torch.multinomial(normalized_probs, num_samples=1).squeeze(-1)  # [num_chains]
-        actual_token_ids = top_k_indices.gather(-1, sampled_token_indices.unsqueeze(-1)).squeeze(-1)  # [num_chains]
-        
-        # Store tracking info for active chains
-        for chain_idx in range(num_chains):
-            if active_chains[chain_idx]:
-                actual_token_id = actual_token_ids[chain_idx].item()
-                generated_token_ids[chain_idx].append(actual_token_id)
-                phase1_tokens[chain_idx].append((top_k_indices[chain_idx].tolist(), normalized_probs[chain_idx].tolist()))
-        
-        # Prepare batch embeddings with proper shape
-        mixed_embeddings_batch = mixed_embeddings.unsqueeze(1)  # [num_chains, 1, hidden_size]
-        # Ensure the batch has the correct dtype
-        mixed_embeddings_batch = mixed_embeddings_batch.to(embedding_matrix.dtype)
-        
-        # Feed mixed embeddings back to model
-        with torch.no_grad():
-            outputs = model(
-                inputs_embeds=mixed_embeddings_batch,
-                past_key_values=past_key_values,
-                use_cache=True,
-                return_dict=True,
-            )
-        
-        past_key_values = outputs.past_key_values
-        phase1_rounds_completed += 1
-    
-    # -------------------------------------------------------------------------
-    # Add </think> token for all chains
-    # -------------------------------------------------------------------------
-    think_end_token = "</think>"
+    # Add initial <think> token for all chains
+    think_start_token = "<think>"
     try:
-        think_end_ids = tokenizer.encode(think_end_token, add_special_tokens=False)
-        for token_id in think_end_ids:
+        think_start_ids = tokenizer.encode(think_start_token, add_special_tokens=False)
+        for token_id in think_start_ids:
             for chain_idx in range(num_chains):
                 generated_token_ids[chain_idx].append(token_id)
-                transition_tokens[chain_idx].append(token_id)
-                
-            # Feed the actual token embedding for all chains
+            
             token_embeddings = embedding_layer(
-                torch.tensor([[token_id] * num_chains], device=device).T  # [num_chains, 1]
+                torch.tensor([[token_id] * num_chains], device=device).T
             ).to(embedding_matrix.dtype)
             
             with torch.no_grad():
@@ -244,110 +121,115 @@ def generate_with_embedding_mixture(
                 )
             past_key_values = outputs.past_key_values
     except:
-        print("Warning: Could not add </think> token")
+        print("Warning: Could not add <think> token")
     
-    # -------------------------------------------------------------------------
-    # Set temperature for phase 2 to 0.6 for more focused generation
-    # -------------------------------------------------------------------------
-    phase2_temperature = 0.6
-    print(f"Setting temperature for Phase 2 to {phase2_temperature}")
-    
-    # -------------------------------------------------------------------------
-    # Add transition tokens (<think> or <answer>) for phase 2
-    # -------------------------------------------------------------------------
-    if PHASE_2_STRATEGY == "think_first":
-        think_start_token = "<think>"
-        try:
-            think_start_ids = tokenizer.encode(think_start_token, add_special_tokens=False)
-            for token_id in think_start_ids:
-                for chain_idx in range(num_chains):
-                    generated_token_ids[chain_idx].append(token_id)
-                    transition_tokens[chain_idx].append(token_id)
-                
-                # Feed the actual token embedding for all chains
-                token_embeddings = embedding_layer(
-                    torch.tensor([[token_id] * num_chains], device=device).T
-                ).to(embedding_matrix.dtype)
-                
-                with torch.no_grad():
-                    outputs = model(
-                        inputs_embeds=token_embeddings,
-                        past_key_values=past_key_values,
-                        use_cache=True,
-                        return_dict=True,
-                    )
-                past_key_values = outputs.past_key_values
-        except:
-            print("Warning: Could not add <think> token")
-    
-    elif PHASE_2_STRATEGY == "answer_first":
-        answer_start_token = "<answer>"
-        try:
-            answer_start_ids = tokenizer.encode(answer_start_token, add_special_tokens=False)
-            for token_id in answer_start_ids:
-                for chain_idx in range(num_chains):
-                    generated_token_ids[chain_idx].append(token_id)
-                    transition_tokens[chain_idx].append(token_id)
-                
-                # Feed the actual token embedding for all chains
-                token_embeddings = embedding_layer(
-                    torch.tensor([[token_id] * num_chains], device=device).T
-                ).to(embedding_matrix.dtype)
-                
-                with torch.no_grad():
-                    outputs = model(
-                        inputs_embeds=token_embeddings,
-                        past_key_values=past_key_values,
-                        use_cache=True,
-                        return_dict=True,
-                    )
-                past_key_values = outputs.past_key_values
-        except:
-            print("Warning: Could not add <answer> token")
-    
-    # -------------------------------------------------------------------------
-    # Phase 2: Standard token-by-token generation for T_exp rounds
-    # -------------------------------------------------------------------------
-    print(f"Phase 2: Standard generation for {T_exp} rounds across {num_chains} chains...")
-    
-    # Track which chains are still generating (not EOS)
-    generating_chains = torch.ones(num_chains, dtype=torch.bool, device=device)
-    
-    for _ in range(T_exp):
-        if not generating_chains.any():
+    # Main generation loop
+    for t in range(T_e + T_exp):
+        if not running_chains.any():
             break
             
-        # Standard sampling from logits for all chains
+        # Get probabilities from current logits
         last_logits = outputs.logits[:, -1, :]  # [num_chains, vocab_size]
-        scaled_logits = last_logits / phase2_temperature
-        probs = F.softmax(scaled_logits, dim=-1)  # [num_chains, vocab_size]
+        probs = obtain_probs_from_logits(last_logits, temperature)
         
-        # Sample next tokens for all chains
-        next_token_ids = torch.multinomial(probs, num_samples=1).squeeze(-1)  # [num_chains]
-        
-        # Update generated tokens and check for EOS
-        token_embeddings_list = []
-        for chain_idx in range(num_chains):
-            next_token_id = next_token_ids[chain_idx].item()
+        # Check for end token probability and update active status
+        if end_token_id is not None:
+            end_token_probs = probs[:, end_token_id]  # [num_chains]
+            should_deactivate = (end_token_probs >= min_end_prob) & active_chains
+            active_chains = active_chains & ~should_deactivate
             
-            if generating_chains[chain_idx]:
-                generated_token_ids[chain_idx].append(next_token_id)
-                phase2_tokens[chain_idx].append(next_token_id)
+            # Log deactivations
+            for chain_idx in range(num_chains):
+                if should_deactivate[chain_idx]:
+                    print(f"Stopping Phase 1 for chain {chain_idx} at round {t} due to end token probability: {end_token_probs[chain_idx]:.3f}")
+        
+        # Prepare embeddings for each chain
+        embeddings_list = []
+        
+        for chain_idx in range(num_chains):
+            if not running_chains[chain_idx]:
+                # Chain already stopped, use zero embedding
+                embeddings_list.append(torch.zeros(1, embedding_matrix.size(1), device=device, dtype=embedding_matrix.dtype))
+                continue
+                
+            if active_chains[chain_idx]:
+                # Active chain: use mixture embedding
+                chain_probs = probs[chain_idx]
+                top_k_probs, top_k_indices = torch.topk(chain_probs, k)
+                normalized_probs = top_k_probs / top_k_probs.sum()
+                
+                # Sample mixture weights from Dirichlet
+                mixture_weights = torch.distributions.dirichlet.Dirichlet(normalized_probs).sample()
+                mixture_weights = mixture_weights / mixture_weights.sum()
+                
+                # Get embeddings and compute mixture
+                top_k_embeddings = embedding_matrix[top_k_indices]  # [k, hidden_size]
+                mixed_embedding = torch.sum(top_k_embeddings * mixture_weights.unsqueeze(-1), dim=0)
+                embeddings_list.append(mixed_embedding.unsqueeze(0))
+                
+                # Track token for logging (sample from normalized probs)
+                sampled_idx = torch.multinomial(normalized_probs, num_samples=1).item()
+                actual_token_id = top_k_indices[sampled_idx].item()
+                generated_token_ids[chain_idx].append(actual_token_id)
+                phase1_tokens[chain_idx].append((top_k_indices.tolist(), normalized_probs.tolist()))
+                
+            else:
+                # Inactive chain: sample token and use its embedding
+                sampled_token_id = torch.multinomial(probs[chain_idx], num_samples=1).item()
+                token_embedding = embedding_layer(torch.tensor([sampled_token_id], device=device))
+                embeddings_list.append(token_embedding)
+                
+                generated_token_ids[chain_idx].append(sampled_token_id)
+                if t >= T_e:
+                    phase2_tokens[chain_idx].append(sampled_token_id)
+                else:
+                    phase1_tokens[chain_idx].append(sampled_token_id)
                 
                 # Check for EOS
-                if next_token_id == tokenizer.eos_token_id:
-                    generating_chains[chain_idx] = False
+                if sampled_token_id == tokenizer.eos_token_id:
+                    running_chains[chain_idx] = False
+                    chain_lengths[chain_idx] = t
+        
+        # Transition from Phase 1 to Phase 2
+        if t == T_e:
+            print(f"Transitioning from Phase 1 to Phase 2 at step {t}")
+            # Make all chains inactive (switch to sampling)
+            active_chains.fill_(False)
             
-            # Get token embedding (even for stopped chains to maintain batch shape)
-            token_embedding = embedding_layer(
-                torch.tensor([[next_token_id]], device=device)
-            ).squeeze(0).to(embedding_matrix.dtype)  # [1, hidden_size]
-            token_embeddings_list.append(token_embedding)
+            # Add </think> token
+            think_end_token = "</think>"
+            try:
+                think_end_ids = tokenizer.encode(think_end_token, add_special_tokens=False)
+                for token_id in think_end_ids:
+                    # Add to all running chains
+                    for chain_idx in range(num_chains):
+                        if running_chains[chain_idx]:
+                            generated_token_ids[chain_idx].append(token_id)
+                            transition_tokens[chain_idx].append(token_id)
+                    
+                    # Feed the token to model
+                    token_embeddings = embedding_layer(
+                        torch.tensor([[token_id] * num_chains], device=device).T
+                    ).to(embedding_matrix.dtype)
+                    
+                    with torch.no_grad():
+                        outputs = model(
+                            inputs_embeds=token_embeddings,
+                            past_key_values=past_key_values,
+                            use_cache=True,
+                            return_dict=True,
+                        )
+                    past_key_values = outputs.past_key_values
+                    
+                # Continue to next iteration to avoid double processing
+                continue
+                    
+            except:
+                print("Warning: Could not add </think> token")
         
-        # Stack token embeddings for batch processing
-        token_embeddings_batch = torch.stack(token_embeddings_list, dim=0)  # [num_chains, 1, hidden_size]
+        # Concatenate embeddings in correct order and feed to model
+        token_embeddings_batch = torch.stack(embeddings_list, dim=0)  # [num_chains, 1, hidden_size]
         
-        # Feed token embeddings back
         with torch.no_grad():
             outputs = model(
                 inputs_embeds=token_embeddings_batch,
@@ -355,12 +237,14 @@ def generate_with_embedding_mixture(
                 use_cache=True,
                 return_dict=True,
             )
-        
         past_key_values = outputs.past_key_values
     
-    # -------------------------------------------------------------------------
-    # Process results for all chains
-    # -------------------------------------------------------------------------
+    # Update chain lengths for chains that didn't stop
+    for chain_idx in range(num_chains):
+        if running_chains[chain_idx]:
+            chain_lengths[chain_idx] = T_e + T_exp
+    
+    # Process results for all chains (same as original)
     batched_prompt_completion_ids = []
     batched_prompt_ids = []
     batched_generated_ids = []
@@ -371,7 +255,6 @@ def generate_with_embedding_mixture(
     for chain_idx in range(num_chains):
         # Decode generated tokens for this chain
         generated_text = tokenizer.decode(generated_token_ids[chain_idx], skip_special_tokens=True)
-        # print(generated_text)
         batched_generated_text.append(generated_text)
         
         # Tensorify the generated token ids
@@ -388,7 +271,6 @@ def generate_with_embedding_mixture(
         completion_mask = (sequence_indices <= eos_idx).int().to(device)
         
         # Use the original single prompt for each chain
-        # prompt_mask and prompt_ids need to have batch dimension for concatenation
         chain_prompt_mask = prompt_mask.unsqueeze(0) if prompt_mask.dim() == 1 else prompt_mask
         chain_prompt_ids = prompt_ids.unsqueeze(0) if prompt_ids.dim() == 1 else prompt_ids
         
@@ -413,7 +295,6 @@ def generate_with_embedding_mixture(
                 'phase1_tokens': len(phase1_tokens[chain_idx]),
                 'phase2_tokens': len(phase2_tokens[chain_idx]),
                 'transition_tokens': len(transition_tokens[chain_idx]),
-                'phase1_rounds_completed': phase1_rounds_completed,
                 'phase1_rounds_requested': T_e,
                 'phase2_rounds_requested': T_exp,
                 'phase1_token_ids': phase1_tokens[chain_idx],
@@ -705,7 +586,6 @@ def create_prompt(tokenizer: AutoTokenizer, question: str) -> str:
         tokenize=False,
         add_generation_prompt=True,
     )
-    pdb.set_trace()
     return prompt
 
 # -----------------------------------------------------------------------------
