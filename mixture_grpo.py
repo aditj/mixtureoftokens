@@ -156,7 +156,7 @@ def generate_with_embedding_mixture(
                 # Active chain: use mixture embedding
                 chain_probs = probs[chain_idx]
                 top_k_probs, top_k_indices = torch.topk(chain_probs, k)
-                normalized_probs = top_k_probs / top_k_probs.sum()
+                normalized_probs = torch.ones_like(top_k_probs) / k
                 
                 # Sample mixture weights from Dirichlet
                 mixture_weights = torch.distributions.dirichlet.Dirichlet(normalized_probs).sample()
@@ -617,19 +617,21 @@ def parse_args():
     parser.add_argument("--T_e", type=int, default=400)
     parser.add_argument("--T",type=int,default=1000)
     parser.add_argument("--experiment_name",type=str,default="non_uniform")
+    parser.add_argument("--slurm_id",type=int,default=0)
 
-    #### get last run 
-    os.makedirs("training_logs", exist_ok=True)
-    last_run = sorted(os.listdir("training_logs"))[-1]
-    current_run = int(last_run.split("_")[-1])+1
-    
     # wandb arguments
     parser.add_argument("--wandb_project", type=str, default="grpo-gsm8k-mix")
     parser.add_argument("--wandb_entity", type=str, default="aditjain1980-cornell-university")
     parser.add_argument("--wandb_log", action="store_true", default=True, help="Log to wandb")
+    #### get last run 
     args = parser.parse_args()
+    os.makedirs("training_logs", exist_ok=True)
+    last_run = sorted(os.listdir("training_logs"))[-1]
+    current_run = int(last_run.split("_")[-1])+1 + args.slurm_id
+    
+
     args.current_run = current_run
-    args.wandb_run_name = f"grpo-gsm8k-mix_{current_run}_model_{args.model.split('/')[-1]}_k_{args.k}"
+    args.wandb_run_name = f"grpo-gsm8k-mix_{current_run}_model_{args.model.split('/')[-1]}_k_{args.k}_T_e_{args.T_e}_T_exp_{args.T - args.T_e}"
     
     return args
 
