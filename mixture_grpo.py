@@ -52,6 +52,7 @@ def generate_with_embedding_mixture(
     max_prompt_length: int = 1024,
     num_chains: int = 1,
     max_completion_length: int = 1024,
+    experiment_name: str = "non_uniform"
 ) -> str | tuple[str, dict]:
     
     device = model.device
@@ -152,8 +153,10 @@ def generate_with_embedding_mixture(
                 # Active chain: use mixture embedding
                 chain_probs = probs[chain_idx]
                 top_k_probs, top_k_indices = torch.topk(chain_probs, k)
-                normalized_probs = top_k_probs / top_k_probs.sum()  
-                # normalized_probs = torch.ones_like(top_k_probs) / k
+                if experiment_name == "non_uniform":
+                    normalized_probs = top_k_probs / top_k_probs.sum()  
+                else:
+                    normalized_probs = torch.ones_like(top_k_probs) / k
                 
                 # Sample mixture weights from Dirichlet
                 mixture_weights = torch.distributions.dirichlet.Dirichlet(normalized_probs).sample()
@@ -487,7 +490,8 @@ def grpo_loss(
     # Generate completions
     prompt_text = create_prompt(tokenizer, question)
     prompt_completion_ids, prompt_ids, completion_ids, attention_mask, completions_text, prompt_text = generate_with_embedding_mixture(
-            model, tokenizer, prompt_text, num_chains=arguments.num_chains, T_e=arguments.T_e, T_exp= int(arguments.T - arguments.T_e), temperature=arguments.temperature,k=arguments.k
+            model, tokenizer, prompt_text, num_chains=arguments.num_chains, T_e=arguments.T_e, T_exp= int(arguments.T - arguments.T_e), 
+            temperature=arguments.temperature,k=arguments.k, experiment_name=arguments.experiment_name
         )
     arguments.kl_weight_beta = 0.02
     # Score completions
@@ -575,7 +579,7 @@ def parse_args():
     
 
     args.current_run = current_run
-    args.wandb_run_name = f"grpo-gsm8k-mix_{current_run}_model_{args.model.split('/')[-1]}_k_{args.k}_T_e_{args.T_e}_T_exp_{args.T - args.T_e}"
+    args.wandb_run_name = f"grpo-gsm8k-mix_{current_run}_model_{args.model.split('/')[-1]}_k_{args.k}_T_e_{args.T_e}_T_exp_{args.T - args.T_e}"+f"_expname_{args.experiment_name}"
     
     return args
 
