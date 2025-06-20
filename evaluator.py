@@ -123,7 +123,7 @@ class GSM8kEvaluator(RewardEvaluator):
 
     def _soft_format_reward(self, completions) -> List[float]:
         """Reward for relaxed XML format."""
-        pattern = r"<think>.*?</think>\s*<answer>.*?</answer>"
+        pattern = r"<think>.*?</think><answer>.*?</answer>"
         responses = [completion[0]["content"] for completion in completions]
         matches = [bool(re.match(pattern, r)) for r in responses]
         return [0.5 if m else 0.0 for m in matches]
